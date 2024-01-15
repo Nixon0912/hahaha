@@ -1,0 +1,27 @@
+
+body, html {
+    height: 100%;
+    margin: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    font-family: 'Arial', sans-serif;
+}
+
+.message {
+    font-size: 72px;
+    color: #d6336c;
+    position: relative;
+    z-index: 2;
+}
+
+.heart-bg {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1;
+    background: url('data:image/svg+xml;utf8,<svg width="100" height="100" xmlns="http://www.w3.org/2000/svg"><g><path d="M50 30 L20 30 Q10 30 10 40 L10 70 Q10 90 30 90 L50 70 L70 90 Q90 90 90 70 L90 40 Q90 30 80 30 L50 30" fill="pink"/></g></svg>') repeat;
+}
