@@ -49,9 +49,57 @@ SYMBOLS = {
         # Trading hours (server time, GMT+? — confirm server offset)
         "session":          "01:05-23:50",  # Mon-Fri
     },
+    "NAS100": {
+        "description":      "NASDAQ 100 Index",
+        "sector":           "Index",
+        "digits":           2,
+        "point":            0.01,
+        "contract_size":    1,
+        "calculation":      "CFD Leverage",
+        "margin_currency":  "USD",
+        "profit_currency":  "USD",
+
+        "spread_type":      "floating",
+        "stops_level":      10,
+        "swap_type":        "points",
+        "swap_long":        -357.5,
+        "swap_short":       -343.8,
+        "triple_swap_day":  "Friday",
+        "commission_pct":   0.0,        # indices: no commission listed
+        "commission_in_out": False,
+        "margin_per_lot":   1152.66,    # approx, notional-based
+
+        "volume_min":       0.01,
+        "volume_max":       500,
+        "volume_step":      0.01,
+        "session":          "01:05-23:50",
+    },
+    "US30": {
+        "description":      "US Dow Jones 30 Index",
+        "sector":           "Index",
+        "digits":           2,
+        "point":            0.01,
+        "contract_size":    1,
+        "calculation":      "CFD Leverage",
+        "margin_currency":  "USD",
+        "profit_currency":  "USD",
+
+        "spread_type":      "floating",
+        "stops_level":      10,
+        "swap_type":        "points",
+        "swap_long":        -720.0,
+        "swap_short":       -720.0,
+        "triple_swap_day":  "Friday",
+        "commission_pct":   0.0,        # indices: no commission listed
+        "commission_in_out": False,
+        "margin_per_lot":   2029.46,    # approx, notional-based
+
+        "volume_min":       0.01,
+        "volume_max":       500,
+        "volume_step":      0.01,
+        "session":          "01:05-23:50",
+    },
     # Add more symbols here as you send their specs:
-    # "NAS100": {...},
-    # "US30":   {...},
     # "EURUSD": {...},
 }
 
@@ -93,3 +141,9 @@ if __name__ == "__main__":
     print(f"  Commission round-turn: ${commission_round_turn('XAUUSD', price, lots):.2f}")
     print(f"  Swap long / night:    ${swap_cost_per_night('XAUUSD', 'long', lots):.2f}")
     print(f"  Swap long / Friday:   ${swap_cost_per_night('XAUUSD', 'long', lots, 'Friday'):.2f}")
+
+    print("\nIndex swaps (1.0 lot, per night):")
+    for sym in ("NAS100", "US30"):
+        print(f"  {sym}: point=${point_value(sym, lots):.2f}  "
+              f"swap_long=${swap_cost_per_night(sym, 'long', lots):.2f}  "
+              f"swap_short=${swap_cost_per_night(sym, 'short', lots):.2f}")
