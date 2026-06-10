@@ -68,6 +68,59 @@ def compute_h1_trend(df_m5: pd.DataFrame) -> pd.Series:
     return h1["trend"].shift(1).reindex(df_m5.index, method="ffill").fillna(0)
 
 
+def compute_regime(
+    df_m5       : pd.DataFrame,
+    adx_period  : int   = 14,
+    atr_ma_per  : int   = 50,
+    min_adx     : float = 22.0,
+    min_atr_r   : float = 0.75,   # must be ≥ 75 % of its 50-bar avg (not too quiet)
+    max_atr_r   : float = 3.5,    # must be ≤ 3.5× its 50-bar avg (not chaotic)
+) -> pd.Series:
+    """
+    H1 market-regime filter.  Returns 1 (trade allowed) or 0 (sit out).
+
+    Condition for trading:
+      ADX(14)  ≥ min_adx          — some directional momentum
+      ATR(14)  ≥ min_atr_r × MA   — not a dead/compressed session (Aug-25 style)
+      ATR(14)  ≤ max_atr_r × MA   — not chaotically wide (Feb-26 style)
+
+    All signals are shifted 1 bar (no look-ahead) then forward-filled
+    onto the M5 index.
+    """
+    h1 = load("H1")
+
+    # ── ATR(14) ──────────────────────────────────────────────────────────────
+    prev_c = h1["close"].shift(1)
+    tr = pd.concat([
+        h1["high"] - h1["low"],
+        (h1["high"] - prev_c).abs(),
+        (h1["low"]  - prev_c).abs(),
+    ], axis=1).max(axis=1)
+    atr    = tr.ewm(span=adx_period, adjust=False).mean()
+    atr_ma = atr.rolling(atr_ma_per, min_periods=atr_ma_per // 2).mean()
+    atr_ratio = atr / atr_ma.replace(0, np.nan)
+
+    # ── ADX(14) via Wilder smoothing ─────────────────────────────────────────
+    up   = (h1["high"] - h1["high"].shift(1)).clip(lower=0)
+    dn   = (h1["low"].shift(1) - h1["low"]).clip(lower=0)
+    dm_p = up.where(up >= dn, 0.0)
+    dm_m = dn.where(dn >  up, 0.0)
+
+    atr_safe  = atr.replace(0, np.nan)
+    di_p = 100 * dm_p.ewm(span=adx_period, adjust=False).mean() / atr_safe
+    di_m = 100 * dm_m.ewm(span=adx_period, adjust=False).mean() / atr_safe
+    dx   = 100 * (di_p - di_m).abs() / (di_p + di_m).replace(0, np.nan)
+    adx  = dx.ewm(span=adx_period, adjust=False).mean()
+
+    tradeable = (
+        (adx       >= min_adx)  &
+        (atr_ratio >= min_atr_r) &
+        (atr_ratio <= max_atr_r)
+    ).astype(int)
+
+    return tradeable.shift(1).reindex(df_m5.index, method="ffill").fillna(0).astype(int)
+
+
 # ── Strategy ──────────────────────────────────────────────────────────────────
 
 class CombinedBreakout(Strategy):
@@ -105,6 +158,7 @@ class CombinedBreakout(Strategy):
         self.arb_ranges  = None
         self.nyo_ranges  = None
         self.h1_trend    = None
+        self.regime      = None   # 1 = trending/trade, 0 = choppy/sit-out
 
         # Account state
         self.initial_bal = initial_balance
@@ -163,6 +217,10 @@ class CombinedBreakout(Strategy):
             return None
 
         if not self._guards_ok():
+            return None
+
+        # Regime filter: skip choppy / dead / chaotic sessions
+        if self.regime is not None and int(self.regime.iloc[i]) == 0:
             return None
 
         close  = bar["close"]
@@ -234,11 +292,13 @@ def run_combined(
     df  = load("M5")
     arb_ranges, nyo_ranges = compute_ranges(df)
     h1_trend = compute_h1_trend(df)
+    regime   = compute_regime(df)
 
     strat              = CombinedBreakout(balance, sl_points, tp_mult)
     strat.arb_ranges   = arb_ranges
     strat.nyo_ranges   = nyo_ranges
     strat.h1_trend     = h1_trend
+    strat.regime       = regime
 
     bt     = Backtester(df, strat, lots=lots, initial_balance=balance)
     report = bt.run()
