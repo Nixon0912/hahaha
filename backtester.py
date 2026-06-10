@@ -177,7 +177,12 @@ class Backtester:
 
             signal = self.strategy.next(i, df)
 
-            if signal == "buy":
+            if signal == "close":
+                # Close-only: no new position opened
+                if self._open:
+                    self._close_trade(bar, bar_time)
+
+            elif signal == "buy":
                 if self._open and self._open.direction == "sell":
                     self._close_trade(bar, bar_time)
                 if not self._open:
