@@ -157,6 +157,9 @@ class Backtester:
         t.pnl = raw_pnl - t.commission - t.swap_paid
         self.balance += t.pnl
         self.trades.append(t)
+        # Keep strategy balance in sync so DD guards work correctly
+        if hasattr(self.strategy, "balance"):
+            self.strategy.balance = self.balance
         self._open = None
 
     # ── Main loop ─────────────────────────────────────────────────────────────

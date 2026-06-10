@@ -93,7 +93,7 @@ class CombinedBreakout(Strategy):
         sl_points       : int   = 1200,
         tp_mult         : float = 2.5,
         daily_dd_guard  : float = 0.04,
-        max_dd_guard    : float = 0.08,
+        max_dd_guard    : float = 0.09,
     ):
         self.sl_points    = sl_points
         self.tp_points    = int(sl_points * tp_mult)
@@ -145,9 +145,12 @@ class CombinedBreakout(Strategy):
         if today != self._day:
             self._new_day(today)
 
-        # Force-close before rollover
-        if self._in_trade and hour >= self.FORCE_CLOSE_H:
-            return self._close()
+        # Force-close: rollover OR max DD breached
+        if self._in_trade:
+            self.peak_bal = max(self.peak_bal, self.balance)
+            total_dd = (self.peak_bal - self.balance) / self.initial_bal
+            if hour >= self.FORCE_CLOSE_H or total_dd >= self.max_dd_guard:
+                return self._close()
 
         # Manage open trade
         if self._in_trade:
