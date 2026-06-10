@@ -3,14 +3,14 @@ Adaptive Strategy — XAUUSD M5
 
 Routes between three sub-strategies based on H1 market regime:
 
-  REGIME_TREND  ADX≥25, ATR 0.75–3.0× MA  →  CombinedBreakout
-                  Edge: institutional session breakouts with momentum
+  REGIME_TREND  ADX≥25, ATR 0.75–3.0× MA  →  CombinedBreakout (wide SL/TP)
+                  Edge: institutional session breakouts with full momentum
   REGIME_SLOW   ADX 18–25, ATR < 1.1× MA  →  EMA Pullback
-                  Edge: slow trends where breakouts fail; buy/sell dips
-                  to the H1 EMA(50) in the dominant direction
-  REGIME_RANGE  ADX < 20                   →  BB Mean Reversion
-                  Edge: range-bound; fade H1 Bollinger Band(20,2σ)
-                  extremes back to midline
+                  Edge: slow trends; enter on M5 pullback to H1 EMA
+  REGIME_RANGE  ADX < 20                   →  Tight Structural Breakout
+                  Same Asian/NY range logic as TREND but with tighter SL
+                  and TP (moves complete quicker in a range); more entries
+                  by also checking M15 and H1 session ranges
   REGIME_CHOP   ATR > 3× MA               →  Sit out
                   No edge when volatility is chaotic; protect capital
 
@@ -61,16 +61,18 @@ PB_M5_EMA  = 21       # pullback EMA on M5
 PB_MAX_PER_DAY = 2    # allow 2 pullback trades per day
 PB_MIN_EXT_PTS = 30   # price must have been at least 30 pts beyond EMA before crossing back
 
-# BB Mean Reversion
-BB_ENTRY_START   = 8;  BB_ENTRY_END = 16   # wider window in range
-BB_SL_PTS        = 80
-BB_TP_MULT       = 1.8  # TP = 144 pts (to BB midline approx)
-BB_PERIOD        = 20
-BB_SIGMA         = 1.8  # tighter → more signals than 2.0σ
-BB_MAX_PER_DAY   = 3    # up to 3 range trades per day
-BB_RSI_SELL      = 58   # RSI above this to sell (overbought confirmation)
-BB_RSI_BUY       = 42   # RSI below this to buy (oversold confirmation)
-BB_COOLDOWN_BARS = 6    # M5 bars to wait after a range trade closes (~30 min)
+# Tight Structural Breakout (RANGE regime) — same Asian/NY logic, smaller moves
+# In a ranging market the Asian range and London range still break intraday,
+# they just don't run as far. Use tighter SL + smaller TP to match.
+RNG_SL_PTS        = 500  # tighter SL (vs 1200 in TREND)
+RNG_TP_MULT       = 1.5  # TP = 750 pts (vs 2.5× in TREND) — range moves finish sooner
+RNG_BUFFER        = 15   # smaller breakout buffer in range (pts)
+RNG_ARB_MIN       = 500  # allow tighter Asian ranges
+RNG_ARB_MAX       = 5000
+RNG_NYO_MIN       = 300
+RNG_NYO_MAX       = 4000
+RNG_MAX_ARB       = 2    # up to 2 ARB attempts per day in range
+RNG_MAX_NYO       = 2    # up to 2 NYO attempts per day in range
 
 FORCE_CLOSE_H  = 21
 DAILY_DD_GUARD = 0.04
@@ -80,10 +82,8 @@ MAX_DD_GUARD   = 0.085
 # ── Regime computation ────────────────────────────────────────────────────────
 
 def compute_all_h1(df_m5: pd.DataFrame,
-                   adx_period : int   = 14,
-                   atr_ma_per : int   = 50,
-                   bb_period  : int   = BB_PERIOD,
-                   bb_sigma   : float = BB_SIGMA,
+                   adx_period    : int   = 14,
+                   atr_ma_per    : int   = 50,
                    min_adx_trend : float = 25.0,
                    min_adx_slow  : float = 18.0,
                    min_atr_r     : float = 0.75,
@@ -92,13 +92,14 @@ def compute_all_h1(df_m5: pd.DataFrame,
                    ) -> pd.DataFrame:
     """
     Returns a DataFrame indexed to df_m5 with columns:
-        regime    int  REGIME_* constant
-        h1_trend  int  +1 / -1 (H1 EMA50 direction)
-        h1_ema50  float
-        m5_ema21  float  (M5 EMA21 for pullback entries, indexed to M5)
-        bb_upper  float  (H1 BB upper band, reindexed to M5)
-        bb_lower  float
-        bb_mid    float
+        regime      int    REGIME_* constant (H1-derived, no look-ahead)
+        h1_trend    int    +1 / -1 (H1 EMA50)
+        h1_ema50    float
+        m5_ema21    float  (M5 EMA21, for pullback entries)
+        m5_bb_upper float  (M5 BB upper, for range mean reversion)
+        m5_bb_lower float
+        m5_bb_mid   float
+        m5_rsi      float  (M5 RSI-9, for range entry confirmation)
     """
     h1 = load("H1")
 
@@ -128,17 +129,7 @@ def compute_all_h1(df_m5: pd.DataFrame,
     dx     = 100 * (di_p - di_m).abs() / (di_p + di_m).replace(0, np.nan)
     adx    = dx.ewm(span=adx_period, adjust=False).mean()
 
-    # ── H1 Bollinger Bands ───────────────────────────────────────────────────
-    bb_mid   = h1["close"].rolling(bb_period).mean()
-    bb_std   = h1["close"].rolling(bb_period).std()
-    bb_upper = bb_mid + bb_sigma * bb_std
-    bb_lower = bb_mid - bb_sigma * bb_std
-
-    # ── H1 RSI(14) ───────────────────────────────────────────────────────────
-    delta = h1["close"].diff()
-    gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
-    loss  = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
-    rsi   = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+    # (H1 BB removed — range sub-strategy uses structural breakout levels)
 
     # ── Regime classification ─────────────────────────────────────────────────
     chop  = atr_ratio > max_atr_r
@@ -156,12 +147,8 @@ def compute_all_h1(df_m5: pd.DataFrame,
     result["regime"]   = _ff(regime_h1).fillna(REGIME_RANGE).astype(int)
     result["h1_trend"] = _ff(h1["trend"]).fillna(0).astype(int)
     result["h1_ema50"] = _ff(h1["ema50"])
-    result["bb_upper"] = _ff(bb_upper)
-    result["bb_lower"] = _ff(bb_lower)
-    result["bb_mid"]   = _ff(bb_mid)
-    result["h1_rsi"]   = _ff(rsi).fillna(50)
 
-    # M5 EMA21 is computed on M5 itself (no look-ahead needed)
+    # M5 EMA21 for pullback entries
     result["m5_ema21"] = ema(df_m5["close"], PB_M5_EMA)
 
     return result
@@ -195,19 +182,21 @@ class AdaptiveStrategy(Strategy):
         # Day state
         self._day        = None
         self._day_start  = initial_balance
+        # TREND regime counters (1 trade per session)
         self._arb_done   = False
         self._nyo_done   = False
-        self._pb_today   = 0    # EMA pullback trades today (max PB_MAX_PER_DAY)
-        self._bb_today   = 0    # BB range trades today (max BB_MAX_PER_DAY)
+        # SLOW regime counter
+        self._pb_today   = 0
+        # RANGE regime counters (allow multiple per session)
+        self._rng_arb    = 0   # ARB attempts used today in range mode
+        self._rng_nyo    = 0   # NYO attempts used today in range mode
 
         # Trade state
         self._in_trade   = False
         self._dir        = None
         self._sl         = None
         self._tp         = None
-        self._tp_dynamic = False   # True when TP tracks BB midline
-        self._is_bb      = False   # True if current open trade is a BB range trade
-        self._last_bb_close_bar = -999   # bar index when last range trade closed
+        self._is_bb      = False  # unused now but kept for _close() compat
 
     def _new_day(self, today):
         self._day      = today
@@ -215,7 +204,8 @@ class AdaptiveStrategy(Strategy):
         self._arb_done  = False
         self._nyo_done  = False
         self._pb_today  = 0
-        self._bb_today  = 0
+        self._rng_arb   = 0
+        self._rng_nyo   = 0
 
     def _guards_ok(self) -> bool:
         self.peak_bal = max(self.peak_bal, self.balance)
@@ -245,13 +235,12 @@ class AdaptiveStrategy(Strategy):
 
         # ── Manage open trade (TP/SL) ─────────────────────────────────────────
         if self._in_trade:
-            tp_price = h["bb_mid"] if self._tp_dynamic else self._tp
             if self._dir == "buy":
-                if bar["low"]  <= self._sl:    return self._close(i, self._is_bb)
-                if bar["high"] >= tp_price:    return self._close(i, self._is_bb)
+                if bar["low"]  <= self._sl: return self._close(i, self._is_bb)
+                if bar["high"] >= self._tp: return self._close(i, self._is_bb)
             else:
-                if bar["high"] >= self._sl:    return self._close(i, self._is_bb)
-                if bar["low"]  <= tp_price:    return self._close(i, self._is_bb)
+                if bar["high"] >= self._sl: return self._close(i, self._is_bb)
+                if bar["low"]  <= self._tp: return self._close(i, self._is_bb)
             return None
 
         if not self._guards_ok():
@@ -319,30 +308,40 @@ class AdaptiveStrategy(Strategy):
                 self._pb_today += 1
                 return "sell"
 
-        # ── RANGE: BB mean reversion (up to BB_MAX_PER_DAY with cooldown) ────
+        # ── RANGE: tight structural breakout (same Asian/NY levels, tighter SL) ─
+        # In a ranging market the intraday structure still produces breakouts —
+        # they just complete quicker. Use the same range levels but with a
+        # tighter SL and smaller TP, and allow re-entry after each close.
         elif regime == REGIME_RANGE:
-            if not (BB_ENTRY_START <= hour < BB_ENTRY_END):
-                return None
-            if self._bb_today >= BB_MAX_PER_DAY:
-                return None
-            if i - self._last_bb_close_bar < BB_COOLDOWN_BARS:
-                return None   # cooldown: wait after last range trade
-            bb_upper = h["bb_upper"]
-            bb_lower = h["bb_lower"]
-            bb_mid   = h["bb_mid"]
-            rsi      = h["h1_rsi"]
-            if pd.isna(bb_upper) or pd.isna(bb_lower):
-                return None
-            # Fade upper band → sell (RSI confirms overbought)
-            if close > bb_upper and rsi >= BB_RSI_SELL:
-                self._enter_bb("sell", close, spread, pt, bb_mid)
-                self._bb_today += 1
-                return "sell"
-            # Fade lower band → buy (RSI confirms oversold)
-            if close < bb_lower and rsi <= BB_RSI_BUY:
-                self._enter_bb("buy",  close, spread, pt, bb_mid)
-                self._bb_today += 1
-                return "buy"
+            buf = RNG_BUFFER * pt
+
+            if (ARB_ENTRY_START <= hour < ARB_ENTRY_END
+                    and self._rng_arb < RNG_MAX_ARB
+                    and today in self.arb_ranges.index):
+                r = self.arb_ranges.loc[today]
+                if RNG_ARB_MIN <= r["range_pts"] <= RNG_ARB_MAX:
+                    if close > r["high"] + buf:
+                        self._enter_fixed("buy",  close, spread, pt, RNG_SL_PTS, RNG_TP_MULT)
+                        self._rng_arb += 1
+                        return "buy"
+                    if close < r["low"] - buf:
+                        self._enter_fixed("sell", close, spread, pt, RNG_SL_PTS, RNG_TP_MULT)
+                        self._rng_arb += 1
+                        return "sell"
+
+            if (NYO_ENTRY_START <= hour < NYO_ENTRY_END
+                    and self._rng_nyo < RNG_MAX_NYO
+                    and today in self.nyo_ranges.index):
+                r = self.nyo_ranges.loc[today]
+                if RNG_NYO_MIN <= r["range_pts"] <= RNG_NYO_MAX:
+                    if close > r["high"] + buf:
+                        self._enter_fixed("buy",  close, spread, pt, RNG_SL_PTS, RNG_TP_MULT)
+                        self._rng_nyo += 1
+                        return "buy"
+                    if close < r["low"] - buf:
+                        self._enter_fixed("sell", close, spread, pt, RNG_SL_PTS, RNG_TP_MULT)
+                        self._rng_nyo += 1
+                        return "sell"
 
         return None
 
@@ -356,30 +355,14 @@ class AdaptiveStrategy(Strategy):
             entry    = close - (spread / 2) * pt
             self._sl = entry + sl_pts * pt
             self._tp = entry - tp_pts * pt
-        self._in_trade   = True
-        self._dir        = direction
-        self._tp_dynamic = False
-        self._is_bb      = False
+        self._in_trade = True
+        self._dir      = direction
+        self._is_bb    = False
 
-    def _enter_bb(self, direction, close, spread, pt, bb_mid):
-        if direction == "buy":
-            entry    = close + (spread / 2) * pt
-            self._sl = entry - BB_SL_PTS * pt
-        else:
-            entry    = close - (spread / 2) * pt
-            self._sl = entry + BB_SL_PTS * pt
-        self._in_trade   = True
-        self._dir        = direction
-        self._tp         = None
-        self._tp_dynamic = True   # TP tracks BB midline each bar
-        self._is_bb      = True
 
     def _close(self, bar_i: int = -1, was_bb: bool = False) -> str:
-        self._in_trade   = False
+        self._in_trade = False
         self._dir = self._sl = self._tp = None
-        self._tp_dynamic = False
-        if was_bb and bar_i >= 0:
-            self._last_bb_close_bar = bar_i
         return "close"
 
 
@@ -599,3 +582,4 @@ if __name__ == "__main__":
     run_adaptive(lots=0.1, balance=10_000.0, df_full=df_full, h1_data=h1_data)
 
     cross_validate(lots=0.1, balance=10_000.0, df_full=df_full, h1_data=h1_data)
+        scan_range(df_full=df_full)
