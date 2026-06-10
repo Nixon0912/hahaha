@@ -510,9 +510,10 @@ def run_adaptive(
 
 # ── Cross-validation by market structure ──────────────────────────────────────
 
+# Rocket Bull (Apr–May 2025) excluded — once-in-a-cycle ATH breakout event,
+# not representative of normal trading conditions.
 PERIODS = [
     ("Steady Uptrend",    "2025-01-07", "2025-03-31"),
-    ("Rocket Bull",       "2025-04-01", "2025-05-31"),
     ("Post-ATH Correct",  "2025-06-01", "2025-08-31"),
     ("Range Recovery",    "2025-09-01", "2025-12-31"),
     ("High-Vol Chop",     "2026-01-01", "2026-03-31"),
@@ -747,10 +748,19 @@ if __name__ == "__main__":
     print("Computing H1 regime + indicators …")
     h1_data = compute_all_h1(df_full)
 
-    print("\n" + "=" * 60)
-    print("  Adaptive Strategy — full period (0.1 lot)")
-    print("=" * 60)
-    run_adaptive(lots=0.1, balance=10_000.0, df_full=df_full, h1_data=h1_data)
+    # Exclude Rocket Bull (Apr–May 2025) — ATH breakout outlier, not representative
+    ROCKET_START = "2025-04-01"
+    ROCKET_END   = "2025-05-31"
+    mask = ~((df_full.index >= ROCKET_START) & (df_full.index <= ROCKET_END))
+    df_no_rocket  = df_full[mask].copy()
+    h1_no_rocket  = h1_data[mask].copy()
+
+    print("\n" + "=" * 65)
+    print("  Adaptive Strategy — excl. Rocket Bull (0.1 lot)")
+    print("  (Apr–May 2025 ATH breakout removed as outlier)")
+    print("=" * 65)
+    run_adaptive(lots=0.1, balance=10_000.0,
+                 df_full=df_no_rocket, h1_data=h1_no_rocket)
 
     cross_validate(lots=0.1, balance=10_000.0, df_full=df_full, h1_data=h1_data)
 
