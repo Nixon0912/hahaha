@@ -138,11 +138,12 @@ def oos_eval(s):
 files={re.match(r"([A-Z0-9]+)_M15",os.path.basename(f)).group(1):f
        for f in sorted(glob.glob(os.path.join(RAW,"*_M15_*.csv")))}
 
-print(f"Multi-archetype OOS scan ({len(files)-len(EXCLUDE)} assets, 70/30 split)\n")
-print(f"  {'Symbol':<8}{'Class':<7}"
+def _scan():
+  print(f"Multi-archetype OOS scan ({len(files)-len(EXCLUDE)} assets, 70/30 split)\n")
+  print(f"  {'Symbol':<8}{'Class':<7}"
       f"{'BRK tr/oos expR':>20}{'MRV tr/oos expR':>20}{'MOM tr/oos expR':>20}")
-winners=[]
-for sym,path in files.items():
+  winners=[]
+  for sym,path in files.items():
     if sym in EXCLUDE: continue
     df=load_raw(path)
     row=f"  {sym:<8}{CLASS.get(sym,'?'):<7}"
@@ -155,8 +156,10 @@ for sym,path in files.items():
         mark="✅" if surv else (" " if r['te']['expR']>0 else "·")
         row+=f"{r['tr']['expR']:>+7.2f}/{r['te']['expR']:>+6.2f}{mark:>3}"
     print(row)
-
-print(f"\n  Edges surviving OOS (tr>0 & oos>0 & oos PF>=1.10 & n>=15): {len(winners)}")
-for sym,tag,r in sorted(winners,key=lambda x:-x[2]['te']['expR']):
+  print(f"\n  Edges surviving OOS (tr>0 & oos>0 & oos PF>=1.10 & n>=15): {len(winners)}")
+  for sym,tag,r in sorted(winners,key=lambda x:-x[2]['te']['expR']):
     print(f"    ✅ {sym:<8} {tag}  OOS: n={r['te']['n']} WR={r['te']['wr']:.0f}% "
           f"PF={r['te']['pf']:.2f} expR={r['te']['expR']:+.3f}")
+
+if __name__=="__main__":
+    _scan()
