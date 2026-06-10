@@ -32,12 +32,14 @@ REGIME_TREND = 0   # breakout
 REGIME_SLOW  = 1   # EMA pullback
 REGIME_RANGE = 2   # BB mean reversion
 REGIME_CHOP  = 3   # sit out
+REGIME_BEAR  = 4   # bearish trending — short-only breakouts, wide TP
 
 REGIME_NAMES = {
     REGIME_TREND: "TREND",
     REGIME_SLOW:  "SLOW ",
     REGIME_RANGE: "RANGE",
     REGIME_CHOP:  "CHOP ",
+    REGIME_BEAR:  "BEAR ",
 }
 
 # ── Params ────────────────────────────────────────────────────────────────────
@@ -73,6 +75,13 @@ RNG_NYO_MIN       = 300
 RNG_NYO_MAX       = 4000
 RNG_MAX_ARB       = 2    # up to 2 ARB attempts per day in range
 RNG_MAX_NYO       = 2    # up to 2 NYO attempts per day in range
+
+# Bearish Trend Breakout — short-only, wide TP to ride the down-move
+BEAR_SL_PTS      = 1000   # give it room, trading with trend
+BEAR_TP_MULT     = 4.0    # 4000 pts TP — let the trend run
+BEAR_BUFFER      = 20     # pts beyond range low to confirm breakdown
+BEAR_EMA_SLOPE_N = 10     # H1 bars to measure EMA50 slope
+BEAR_SLOPE_MIN   = -0.1   # EMA50 must be falling ≥ 0.1 pts/H1 bar (~$2.4/day)
 
 FORCE_CLOSE_H  = 21
 DAILY_DD_GUARD = 0.04
@@ -131,13 +140,20 @@ def compute_all_h1(df_m5: pd.DataFrame,
 
     # (H1 BB removed — range sub-strategy uses structural breakout levels)
 
+    # ── H1 EMA50 slope (bearish trend detection) ─────────────────────────────
+    # slope = change in EMA50 per H1 bar over last BEAR_EMA_SLOPE_N bars
+    ema50_slope = h1["ema50"].diff(BEAR_EMA_SLOPE_N) / BEAR_EMA_SLOPE_N
+
     # ── Regime classification ─────────────────────────────────────────────────
     chop  = atr_ratio > max_atr_r
-    trend = (~chop) & (adx >= min_adx_trend) & (atr_ratio >= min_atr_r)
-    slow  = (~chop) & (~trend) & (adx >= min_adx_slow) & (atr_ratio <= slow_atr_cap)
+    # Bearish trend: price below EMA50, EMA50 sloping down, ADX trending
+    bear  = (~chop) & (h1["trend"] == -1) & (ema50_slope <= BEAR_SLOPE_MIN) & (adx >= min_adx_slow) & (atr_ratio >= min_atr_r)
+    trend = (~chop) & (~bear) & (adx >= min_adx_trend) & (atr_ratio >= min_atr_r)
+    slow  = (~chop) & (~bear) & (~trend) & (adx >= min_adx_slow) & (atr_ratio <= slow_atr_cap)
     regime_h1 = pd.Series(REGIME_RANGE, index=h1.index)
     regime_h1[trend] = REGIME_TREND
     regime_h1[slow]  = REGIME_SLOW
+    regime_h1[bear]  = REGIME_BEAR
     regime_h1[chop]  = REGIME_CHOP
 
     # ── Shift 1 H1 bar (no look-ahead), reindex to M5 ───────────────────────
@@ -150,6 +166,8 @@ def compute_all_h1(df_m5: pd.DataFrame,
 
     # M5 EMA21 for pullback entries
     result["m5_ema21"] = ema(df_m5["close"], PB_M5_EMA)
+
+    result["h1_ema_slope"] = _ff(ema50_slope).fillna(0)
 
     return result
 
@@ -190,6 +208,8 @@ class AdaptiveStrategy(Strategy):
         # RANGE regime counters (allow multiple per session)
         self._rng_arb    = 0   # ARB attempts used today in range mode
         self._rng_nyo    = 0   # NYO attempts used today in range mode
+        self._bear_arb   = 0   # short ARB trades today in bear mode
+        self._bear_nyo   = 0   # short NYO trades today in bear mode
 
         # Trade state
         self._in_trade   = False
@@ -206,6 +226,8 @@ class AdaptiveStrategy(Strategy):
         self._pb_today  = 0
         self._rng_arb   = 0
         self._rng_nyo   = 0
+        self._bear_arb   = 0
+        self._bear_nyo   = 0
 
     def _guards_ok(self) -> bool:
         self.peak_bal = max(self.peak_bal, self.balance)
@@ -343,6 +365,32 @@ class AdaptiveStrategy(Strategy):
                         self._rng_nyo += 1
                         return "sell"
 
+        # ── BEAR: short-only structural breakout, wide TP ─────────────────────
+        # In a confirmed bearish trend (EMA50 sloping down, price below EMA50),
+        # only take breakdown shorts. Skip longs — they fade quickly.
+        elif regime == REGIME_BEAR:
+            buf = BEAR_BUFFER * pt
+
+            if (ARB_ENTRY_START <= hour < ARB_ENTRY_END
+                    and self._bear_arb < 1
+                    and today in self.arb_ranges.index):
+                r = self.arb_ranges.loc[today]
+                if ARB_MIN_RANGE <= r["range_pts"] <= ARB_MAX_RANGE:
+                    if close < r["low"] - buf:
+                        self._enter_fixed("sell", close, spread, pt, BEAR_SL_PTS, BEAR_TP_MULT)
+                        self._bear_arb += 1
+                        return "sell"
+
+            if (NYO_ENTRY_START <= hour < NYO_ENTRY_END
+                    and self._bear_nyo < 1
+                    and today in self.nyo_ranges.index):
+                r = self.nyo_ranges.loc[today]
+                if NYO_MIN_RANGE <= r["range_pts"] <= NYO_MAX_RANGE:
+                    if close < r["low"] - buf:
+                        self._enter_fixed("sell", close, spread, pt, BEAR_SL_PTS, BEAR_TP_MULT)
+                        self._bear_nyo += 1
+                        return "sell"
+
         return None
 
     def _enter_fixed(self, direction, close, spread, pt, sl_pts, tp_mult):
@@ -472,6 +520,129 @@ PERIODS = [
 ]
 
 
+def find_bear_periods(df_full: pd.DataFrame, h1_data: pd.DataFrame,
+                      min_days: int = 5) -> list[tuple[str, str]]:
+    """
+    Find contiguous date ranges in the historical data where REGIME_BEAR
+    was active for at least min_days consecutive trading days.
+    Returns list of (start_date, end_date) strings.
+    """
+    bear_mask = h1_data["regime"] == REGIME_BEAR
+    # Map to daily: day is "bear" if majority of its H1 bars are REGIME_BEAR
+    bear_mask.index = pd.to_datetime(bear_mask.index)
+    daily_bear = bear_mask.resample("D").mean()
+    daily_bear = (daily_bear >= 0.3).reindex(
+        pd.date_range(daily_bear.index[0], daily_bear.index[-1], freq="D")
+    ).fillna(False)
+
+    periods = []
+    in_bear = False
+    start = None
+    streak = 0
+
+    for date, is_bear in daily_bear.items():
+        if is_bear:
+            if not in_bear:
+                start = date
+                streak = 0
+                in_bear = True
+            streak += 1
+        else:
+            if in_bear and streak >= min_days:
+                periods.append((start.strftime("%Y-%m-%d"), date.strftime("%Y-%m-%d")))
+            in_bear = False
+            streak = 0
+
+    if in_bear and streak >= min_days:
+        periods.append((start.strftime("%Y-%m-%d"), daily_bear.index[-1].strftime("%Y-%m-%d")))
+
+    return periods
+
+
+def validate_bear(lots=0.1, balance=10_000.0, df_full=None, h1_data=None):
+    """Run the adaptive strategy on all identified BEAR periods."""
+    if df_full is None:
+        df_full = load("M5")
+    if h1_data is None:
+        h1_data = compute_all_h1(df_full)
+
+    periods = find_bear_periods(df_full, h1_data)
+    if not periods:
+        print("  No bearish trending periods found in data.")
+        return
+
+    print(f"\n{'='*70}")
+    print(f"  Bearish Trend Periods — validation ({lots} lot)")
+    print(f"{'='*70}")
+    print(f"  Detected {len(periods)} BEAR period(s) ≥ 10 trading days\n")
+
+    for start, end in periods:
+        df   = df_full.loc[start:end].copy()
+        h1_s = h1_data.loc[start:end].copy()
+        if len(df) < 20:
+            continue
+
+        arb_ranges, nyo_ranges = compute_ranges(df)
+        strat = AdaptiveStrategy(balance)
+        strat.h1_data    = h1_s
+        strat.arb_ranges = arb_ranges
+        strat.nyo_ranges = nyo_ranges
+
+        bt     = Backtester(df, strat, lots=lots, initial_balance=balance)
+        report = bt.run()
+        log    = report.trade_log()
+
+        if log.empty:
+            print(f"  [{start} → {end}]  0 trades\n")
+            continue
+
+        s = report.summary()
+        log["date"]  = log["exit_time"].dt.date
+        log["month"] = log["exit_time"].dt.to_period("M")
+        daily   = log.groupby("date")["pnl"].sum()
+        monthly = log.groupby("month")["pnl"].sum()
+        worst_pct = daily.min() / balance * 100
+
+        # Count regime breakdown
+        try:
+            reg_counts = {}
+            for ts in log["entry_time"]:
+                rn = REGIME_NAMES.get(int(h1_s["regime"].asof(ts)), "?")
+                reg_counts[rn] = reg_counts.get(rn, 0) + 1
+            reg_str = " ".join(f"{k}:{v}" for k, v in sorted(reg_counts.items()))
+        except Exception:
+            reg_str = ""
+
+        # Challenge sim
+        bal, peak = balance, balance
+        ch = "⏳ Not reached"
+        ch_date = None
+        for _, t in log.iterrows():
+            bal  += t["pnl"]
+            peak  = max(peak, bal)
+            if bal >= balance * 1.08:
+                ch = "✅ PASS"; ch_date = t["exit_time"].date(); break
+            if peak - bal >= balance * 0.10:
+                ch = "❌ FAIL(DD)"; ch_date = t["exit_time"].date(); break
+        if worst_pct <= -5.0:
+            ch = "❌ FAIL(daily)"
+
+        days = (pd.Timestamp(end) - pd.Timestamp(start)).days
+        print(f"  [{start} → {end}]  ({days}d)")
+        print(f"    trades={len(log):>3}  win={(log['pnl']>0).mean()*100:.0f}%  "
+              f"monthly=${monthly.mean():>7,.0f}  PF={s['profit_factor']:>5}  "
+              f"max_dd={s['max_drawdown']:>10}  worst_day={worst_pct:.2f}%")
+        print(f"    regimes: {reg_str}")
+        print(f"    {ch}{f'  ({ch_date})' if ch_date else ''}")
+
+        print(f"    Monthly PnL:")
+        for m, v in monthly.items():
+            bar_c = "▓" * max(0, int(abs(v) / 30))
+            sign  = "+" if v > 0 else ""
+            print(f"      {m}  {sign}${v:>8,.2f}  {bar_c}")
+        print()
+
+
 def cross_validate(lots=0.1, balance=10_000.0, df_full=None, h1_data=None):
     if df_full is None:
         df_full = load("M5")
@@ -582,4 +753,6 @@ if __name__ == "__main__":
     run_adaptive(lots=0.1, balance=10_000.0, df_full=df_full, h1_data=h1_data)
 
     cross_validate(lots=0.1, balance=10_000.0, df_full=df_full, h1_data=h1_data)
-        scan_range(df_full=df_full)
+
+    print("\n\n")
+    validate_bear(lots=0.1, balance=10_000.0, df_full=df_full, h1_data=h1_data)
