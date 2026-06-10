@@ -57,12 +57,20 @@ PB_SL_PTS  = 120      # pts
 PB_TP_MULT = 2.0      # TP = 240 pts
 PB_M5_EMA  = 21       # pullback EMA on M5
 
+# EMA Pullback
+PB_MAX_PER_DAY = 2    # allow 2 pullback trades per day
+PB_MIN_EXT_PTS = 30   # price must have been at least 30 pts beyond EMA before crossing back
+
 # BB Mean Reversion
-BB_ENTRY_START = 8;   BB_ENTRY_END = 14
-BB_SL_PTS = 100
-BB_TP_MULT = 1.5      # TP = 150 pts
-BB_PERIOD  = 20
-BB_SIGMA   = 2.0
+BB_ENTRY_START   = 8;  BB_ENTRY_END = 16   # wider window in range
+BB_SL_PTS        = 80
+BB_TP_MULT       = 1.8  # TP = 144 pts (to BB midline approx)
+BB_PERIOD        = 20
+BB_SIGMA         = 1.8  # tighter → more signals than 2.0σ
+BB_MAX_PER_DAY   = 3    # up to 3 range trades per day
+BB_RSI_SELL      = 58   # RSI above this to sell (overbought confirmation)
+BB_RSI_BUY       = 42   # RSI below this to buy (oversold confirmation)
+BB_COOLDOWN_BARS = 6    # M5 bars to wait after a range trade closes (~30 min)
 
 FORCE_CLOSE_H  = 21
 DAILY_DD_GUARD = 0.04
@@ -126,6 +134,12 @@ def compute_all_h1(df_m5: pd.DataFrame,
     bb_upper = bb_mid + bb_sigma * bb_std
     bb_lower = bb_mid - bb_sigma * bb_std
 
+    # ── H1 RSI(14) ───────────────────────────────────────────────────────────
+    delta = h1["close"].diff()
+    gain  = delta.clip(lower=0).ewm(span=14, adjust=False).mean()
+    loss  = (-delta).clip(lower=0).ewm(span=14, adjust=False).mean()
+    rsi   = 100 - 100 / (1 + gain / loss.replace(0, np.nan))
+
     # ── Regime classification ─────────────────────────────────────────────────
     chop  = atr_ratio > max_atr_r
     trend = (~chop) & (adx >= min_adx_trend) & (atr_ratio >= min_atr_r)
@@ -145,6 +159,7 @@ def compute_all_h1(df_m5: pd.DataFrame,
     result["bb_upper"] = _ff(bb_upper)
     result["bb_lower"] = _ff(bb_lower)
     result["bb_mid"]   = _ff(bb_mid)
+    result["h1_rsi"]   = _ff(rsi).fillna(50)
 
     # M5 EMA21 is computed on M5 itself (no look-ahead needed)
     result["m5_ema21"] = ema(df_m5["close"], PB_M5_EMA)
@@ -182,21 +197,25 @@ class AdaptiveStrategy(Strategy):
         self._day_start  = initial_balance
         self._arb_done   = False
         self._nyo_done   = False
-        self._day_traded = False   # for SLOW/RANGE subs (1 trade/day)
+        self._pb_today   = 0    # EMA pullback trades today (max PB_MAX_PER_DAY)
+        self._bb_today   = 0    # BB range trades today (max BB_MAX_PER_DAY)
 
         # Trade state
         self._in_trade   = False
         self._dir        = None
         self._sl         = None
         self._tp         = None
-        self._tp_dynamic = False   # True when TP is a price level (BB mid)
+        self._tp_dynamic = False   # True when TP tracks BB midline
+        self._is_bb      = False   # True if current open trade is a BB range trade
+        self._last_bb_close_bar = -999   # bar index when last range trade closed
 
     def _new_day(self, today):
-        self._day        = today
-        self._day_start  = self.balance
-        self._arb_done   = False
-        self._nyo_done   = False
-        self._day_traded = False
+        self._day      = today
+        self._day_start = self.balance
+        self._arb_done  = False
+        self._nyo_done  = False
+        self._pb_today  = 0
+        self._bb_today  = 0
 
     def _guards_ok(self) -> bool:
         self.peak_bal = max(self.peak_bal, self.balance)
@@ -222,17 +241,17 @@ class AdaptiveStrategy(Strategy):
             self.peak_bal = max(self.peak_bal, self.balance)
             total_dd = (self.peak_bal - self.balance) / self.initial_bal
             if hour >= self.FORCE_CLOSE_H or total_dd >= self.max_dd_guard:
-                return self._close()
+                return self._close(i, self._is_bb)
 
         # ── Manage open trade (TP/SL) ─────────────────────────────────────────
         if self._in_trade:
             tp_price = h["bb_mid"] if self._tp_dynamic else self._tp
             if self._dir == "buy":
-                if bar["low"]  <= self._sl:    return self._close()
-                if bar["high"] >= tp_price:    return self._close()
+                if bar["low"]  <= self._sl:    return self._close(i, self._is_bb)
+                if bar["high"] >= tp_price:    return self._close(i, self._is_bb)
             else:
-                if bar["high"] >= self._sl:    return self._close()
-                if bar["low"]  <= tp_price:    return self._close()
+                if bar["high"] >= self._sl:    return self._close(i, self._is_bb)
+                if bar["low"]  <= tp_price:    return self._close(i, self._is_bb)
             return None
 
         if not self._guards_ok():
@@ -278,42 +297,51 @@ class AdaptiveStrategy(Strategy):
                         self._nyo_done = True
                         return "sell"
 
-        # ── SLOW: EMA pullback ────────────────────────────────────────────────
+        # ── SLOW: EMA pullback (up to PB_MAX_PER_DAY per day) ────────────────
         elif regime == REGIME_SLOW:
-            if not (PB_ENTRY_START <= hour < PB_ENTRY_END) or self._day_traded:
+            if not (PB_ENTRY_START <= hour < PB_ENTRY_END):
+                return None
+            if self._pb_today >= PB_MAX_PER_DAY:
                 return None
             m5_ema = h["m5_ema21"]
             if pd.isna(m5_ema):
                 return None
-            # Long: H1 uptrend, price just crossed back above M5 EMA (pullback complete)
             prev_close = df["close"].iloc[i - 1]
-            if trend > 0 and prev_close < m5_ema and close >= m5_ema:
+            # Require meaningful extension before pullback cross (not just noise)
+            extended_long  = prev_close < m5_ema - PB_MIN_EXT_PTS * pt
+            extended_short = prev_close > m5_ema + PB_MIN_EXT_PTS * pt
+            if trend > 0 and extended_long and close >= m5_ema:
                 self._enter_fixed("buy",  close, spread, pt, PB_SL_PTS, PB_TP_MULT)
-                self._day_traded = True
+                self._pb_today += 1
                 return "buy"
-            if trend < 0 and prev_close > m5_ema and close <= m5_ema:
+            if trend < 0 and extended_short and close <= m5_ema:
                 self._enter_fixed("sell", close, spread, pt, PB_SL_PTS, PB_TP_MULT)
-                self._day_traded = True
+                self._pb_today += 1
                 return "sell"
 
-        # ── RANGE: BB mean reversion ──────────────────────────────────────────
+        # ── RANGE: BB mean reversion (up to BB_MAX_PER_DAY with cooldown) ────
         elif regime == REGIME_RANGE:
-            if not (BB_ENTRY_START <= hour < BB_ENTRY_END) or self._day_traded:
+            if not (BB_ENTRY_START <= hour < BB_ENTRY_END):
                 return None
+            if self._bb_today >= BB_MAX_PER_DAY:
+                return None
+            if i - self._last_bb_close_bar < BB_COOLDOWN_BARS:
+                return None   # cooldown: wait after last range trade
             bb_upper = h["bb_upper"]
             bb_lower = h["bb_lower"]
             bb_mid   = h["bb_mid"]
+            rsi      = h["h1_rsi"]
             if pd.isna(bb_upper) or pd.isna(bb_lower):
                 return None
-            # Fade upper band → sell; fade lower band → buy
-            # Only trade if BB mid is in trend direction (avoid fighting strong moves)
-            if close > bb_upper:
+            # Fade upper band → sell (RSI confirms overbought)
+            if close > bb_upper and rsi >= BB_RSI_SELL:
                 self._enter_bb("sell", close, spread, pt, bb_mid)
-                self._day_traded = True
+                self._bb_today += 1
                 return "sell"
-            if close < bb_lower:
+            # Fade lower band → buy (RSI confirms oversold)
+            if close < bb_lower and rsi <= BB_RSI_BUY:
                 self._enter_bb("buy",  close, spread, pt, bb_mid)
-                self._day_traded = True
+                self._bb_today += 1
                 return "buy"
 
         return None
@@ -331,6 +359,7 @@ class AdaptiveStrategy(Strategy):
         self._in_trade   = True
         self._dir        = direction
         self._tp_dynamic = False
+        self._is_bb      = False
 
     def _enter_bb(self, direction, close, spread, pt, bb_mid):
         if direction == "buy":
@@ -341,13 +370,16 @@ class AdaptiveStrategy(Strategy):
             self._sl = entry + BB_SL_PTS * pt
         self._in_trade   = True
         self._dir        = direction
-        self._tp         = None       # dynamic: BB midline (updated each bar)
-        self._tp_dynamic = True       # checked against h["bb_mid"] in manage loop
+        self._tp         = None
+        self._tp_dynamic = True   # TP tracks BB midline each bar
+        self._is_bb      = True
 
-    def _close(self) -> str:
+    def _close(self, bar_i: int = -1, was_bb: bool = False) -> str:
         self._in_trade   = False
         self._dir = self._sl = self._tp = None
         self._tp_dynamic = False
+        if was_bb and bar_i >= 0:
+            self._last_bb_close_bar = bar_i
         return "close"
 
 
