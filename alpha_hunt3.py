@@ -159,8 +159,10 @@ def score_batch(opps_arr: dict, cfg_list: list) -> list:
             tp_price = entry + dirs * tp_pts * PT
             sl_price = entry - dirs * sl_pts * PT
 
-            tp_hit = np.where(dirs == 1, d_hi >= tp_price, d_lo <= tp_price)
-            pnl = np.where(tp_hit, tp_pts, -sl_pts) * LOT_VAL
+            sl_hit   = np.where(dirs == 1, d_lo <= sl_price, d_hi >= sl_price)
+            tp_hit   = np.where(dirs == 1, d_hi >= tp_price, d_lo <= tp_price)
+            tp_clean = tp_hit & ~sl_hit
+            pnl = np.where(tp_clean, tp_pts, -sl_pts) * LOT_VAL
             pnl -= spread * 0.5 * LOT_VAL + COMM
 
             # Metrics
@@ -316,10 +318,16 @@ def scan(top_n=20):
                 else:
                     sl_pts = np.clip(rng_v * 0.5, cfg["sl_min"], cfg["sl_max"])
 
-                tp_pts = sl_pts * cfg["tp_mult"]
+                tp_pts   = sl_pts * cfg["tp_mult"]
                 tp_price = entry + dirs * tp_pts * PT
+                sl_price = entry - dirs * sl_pts * PT
+
+                # SL takes priority: if SL is hit, it's a loss even if TP is also in range
+                sl_hit = np.where(dirs == 1, d_lo <= sl_price, d_hi >= sl_price)
                 tp_hit = np.where(dirs == 1, d_hi >= tp_price, d_lo <= tp_price)
-                pnl = np.where(tp_hit, tp_pts, -sl_pts) * LOT_VAL
+                # Only count TP if SL was NOT hit
+                tp_clean = tp_hit & ~sl_hit
+                pnl = np.where(tp_clean, tp_pts, -sl_pts) * LOT_VAL
                 pnl -= spread * 0.5 * LOT_VAL + COMM
 
                 wins  = pnl[pnl > 0].sum()
