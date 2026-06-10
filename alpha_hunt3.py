@@ -40,6 +40,30 @@ ALPHA_WORST_DAY = -5.0
 ALPHA_MIN_TR    = 5
 
 
+def _compute_adx(h1, period=14):
+    """Wilder ADX on H1 OHLC."""
+    hi = h1["high"]; lo = h1["low"]; cl = h1["close"]
+    prev_hi = hi.shift(1); prev_lo = lo.shift(1); prev_cl = cl.shift(1)
+    tr = pd.concat([hi-lo, (hi-prev_cl).abs(), (lo-prev_cl).abs()], axis=1).max(axis=1)
+    dm_p = np.where((hi-prev_hi) > (prev_lo-lo), np.maximum(hi-prev_hi, 0), 0)
+    dm_m = np.where((prev_lo-lo) > (hi-prev_hi), np.maximum(prev_lo-lo, 0), 0)
+    def _wilder(s, n):
+        out = np.full(len(s), np.nan)
+        arr = np.asarray(s, dtype=float)
+        # seed
+        start = n
+        out[start-1] = np.nanmean(arr[:start])
+        for i in range(start, len(arr)):
+            out[i] = out[i-1] - out[i-1]/n + arr[i]
+        return pd.Series(out, index=s.index)
+    atr14   = _wilder(tr, period)
+    di_p    = 100 * _wilder(pd.Series(dm_p, index=h1.index), period) / atr14
+    di_m    = 100 * _wilder(pd.Series(dm_m, index=h1.index), period) / atr14
+    dx      = 100 * (di_p - di_m).abs() / (di_p + di_m).replace(0, np.nan)
+    adx     = _wilder(dx.fillna(0), period)
+    return adx, atr14
+
+
 def build_opps(df_full):
     print("  Building opportunity table …")
     h1 = load("H1")
@@ -48,12 +72,16 @@ def build_opps(df_full):
                     (h1["high"]-prev_c).abs(),
                     (h1["low"]-prev_c).abs()], axis=1).max(axis=1)
     h1_atr  = tr.ewm(span=14, adjust=False).mean()
+    h1_atr_ma = h1_atr.rolling(50, min_periods=25).mean()
     h1_ema  = h1["close"].ewm(span=50, adjust=False).mean()
     h1_trend = (h1["close"] > h1_ema).astype(int)*2 - 1
+    h1_adx, _ = _compute_adx(h1)
 
     def _ff(s): return s.shift(1).reindex(df_full.index, method="ffill")
-    m5_atr   = _ff(h1_atr)
-    m5_trend = _ff(h1_trend).fillna(0).astype(int)
+    m5_atr    = _ff(h1_atr)
+    m5_atr_ma = _ff(h1_atr_ma)
+    m5_trend  = _ff(h1_trend).fillna(0).astype(int)
+    m5_adx    = _ff(h1_adx).fillna(0)
 
     arb_ranges, nyo_ranges = compute_ranges(df_full.copy())
     buf = 30 * PT
@@ -77,7 +105,10 @@ def build_opps(df_full):
             for t, bar in win.iterrows():
                 close  = bar["close"]; spread = bar["spread"]
                 atr    = float(m5_atr.get(t, 0) or 0)
+                atr_ma = float(m5_atr_ma.get(t, 0) or 0)
                 trend  = int(m5_trend.get(t, 0) or 0)
+                adx    = float(m5_adx.get(t, 0) or 0)
+                atr_exp = 1 if (atr_ma > 0 and atr >= atr_ma) else 0
                 direction = None
                 if close > r["high"] + buf:
                     direction = 1
@@ -89,11 +120,11 @@ def build_opps(df_full):
                     rem = day_df.loc[t:]
                     records.append((date, sess, direction, entry, spread,
                                     atr, trend, rng, rem["high"].max(),
-                                    rem["low"].min(), dow))
+                                    rem["low"].min(), dow, adx, atr_exp))
                     break
 
     cols = ["date","session","direction","entry","spread",
-            "h1_atr","h1_trend","range_pts","day_high","day_low","dow"]
+            "h1_atr","h1_trend","range_pts","day_high","day_low","dow","h1_adx","atr_exp"]
     opps = pd.DataFrame(records, columns=cols)
     print(f"  {len(opps):,} opportunities  ({len(opps[opps.session=='ARB'])} ARB, "
           f"{len(opps[opps.session=='NYO'])} NYO)")
@@ -121,7 +152,9 @@ def score_batch(opps_arr: dict, cfg_list: list) -> list:
             elif cfg["dow"] == "no-fri": mask &= pa["dow"] != 4
 
             # ATR gate
-            if cfg["min_atr"] > 0: mask &= pa["h1_atr"] >= cfg["min_atr"]
+            if cfg["min_atr"] > 0:  mask &= pa["h1_atr"] >= cfg["min_atr"]
+            if cfg["min_adx"] > 0:  mask &= pa["h1_adx"] >= cfg["min_adx"]
+            if cfg["req_atr_exp"]:  mask &= pa["atr_exp"] == 1
 
             # Range/ATR ratio
             if cfg["min_rr"] > 0:
@@ -239,6 +272,8 @@ def scan(top_n=20):
             "entry":     s["entry"].values.astype(np.float32),
             "spread":    s["spread"].values.astype(np.float32),
             "date":      s["date_int"].values.astype(np.int32),
+            "h1_adx":    s["h1_adx"].values.astype(np.float32),
+            "atr_exp":   s["atr_exp"].values.astype(np.int8),
         }
 
     # Fix session comparison for numpy string arrays
@@ -261,17 +296,20 @@ def scan(top_n=20):
                                 for use_nyo in [True, False]:
                                     if not use_arb and not use_nyo: continue
                                     for min_atr in [0.0, 5.0, 8.0, 12.0]:
-                                        for min_rr in [0.0, 0.2, 0.4]:
-                                            for trend in [True, False]:
-                                                for dow in ["all","mon-thu","no-fri"]:
-                                                    cfgs.append(dict(
-                                                        sl_mode=sl_mode, sl_fixed=sl_fixed,
-                                                        tp_mult=tp_mult, sl_atr_m=sl_atr_m,
-                                                        sl_min=sl_min, sl_max=sl_max,
-                                                        use_arb=use_arb, use_nyo=use_nyo,
-                                                        min_atr=min_atr, min_rr=min_rr,
-                                                        trend=trend, dow=dow,
-                                                    ))
+                                        for min_adx in [0.0, 18.0, 22.0, 27.0]:
+                                            for req_atr_exp in [False, True]:
+                                                for min_rr in [0.0, 0.2, 0.4]:
+                                                    for trend in [True, False]:
+                                                        for dow in ["all","mon-thu","no-fri"]:
+                                                            cfgs.append(dict(
+                                                                sl_mode=sl_mode, sl_fixed=sl_fixed,
+                                                                tp_mult=tp_mult, sl_atr_m=sl_atr_m,
+                                                                sl_min=sl_min, sl_max=sl_max,
+                                                                use_arb=use_arb, use_nyo=use_nyo,
+                                                                min_atr=min_atr, min_adx=min_adx,
+                                                                req_atr_exp=req_atr_exp,
+                                                                min_rr=min_rr, trend=trend, dow=dow,
+                                                            ))
 
     print(f"\nScanning {len(cfgs):,} configs …\n")
     t0 = time.time()
@@ -290,7 +328,9 @@ def scan(top_n=20):
                 if not cfg["use_nyo"]: mask &= pa["session"] == "ARB"
                 if cfg["dow"] == "mon-thu": mask &= pa["dow"] <= 3
                 elif cfg["dow"] == "no-fri": mask &= pa["dow"] != 4
-                if cfg["min_atr"] > 0: mask &= pa["h1_atr"] >= cfg["min_atr"]
+                if cfg["min_atr"] > 0:  mask &= pa["h1_atr"] >= cfg["min_atr"]
+                if cfg["min_adx"] > 0:  mask &= pa["h1_adx"] >= cfg["min_adx"]
+                if cfg["req_atr_exp"]:  mask &= pa["atr_exp"] == 1
                 if cfg["min_rr"] > 0:
                     with np.errstate(divide="ignore", invalid="ignore"):
                         rr = np.where(pa["h1_atr"] > 0,
@@ -396,9 +436,11 @@ def scan(top_n=20):
         sess  = "ARB+NYO" if c["use_arb"] and c["use_nyo"] else ("ARB" if c["use_arb"] else "NYO")
         trend = "trend" if c["trend"] else "no-trend"
         extras = []
-        if c["min_atr"] > 0: extras.append(f"atr≥{c['min_atr']}")
-        if c["min_rr"]  > 0: extras.append(f"rr≥{c['min_rr']}")
-        if c["dow"] != "all": extras.append(c["dow"])
+        if c["min_atr"]    > 0:  extras.append(f"atr≥{c['min_atr']}")
+        if c["min_adx"]    > 0:  extras.append(f"adx≥{c['min_adx']}")
+        if c["req_atr_exp"]:     extras.append("atr-expanding")
+        if c["min_rr"]     > 0:  extras.append(f"rr≥{c['min_rr']}")
+        if c["dow"] != "all":    extras.append(c["dow"])
         extra_str = " ".join(extras)
         print(f"  #{rank:<2} [{label_tag}]  avg_monthly=${row['avg_monthly']:>7,.0f}  "
               f"min_PF={row['min_pf']:.2f}  worst_DD=${row['worst_dd']:>8,.0f}")
