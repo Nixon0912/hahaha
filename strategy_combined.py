@@ -93,7 +93,7 @@ class CombinedBreakout(Strategy):
         sl_points       : int   = 1200,
         tp_mult         : float = 2.5,
         daily_dd_guard  : float = 0.04,
-        max_dd_guard    : float = 0.09,
+        max_dd_guard    : float = 0.085,  # triggers at 8.5% → actual max DD stays ≤ 9%
     ):
         self.sl_points    = sl_points
         self.tp_points    = int(sl_points * tp_mult)
