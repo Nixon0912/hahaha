@@ -194,3 +194,62 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+def run_all9_filter():
+    """Apply trained ML model to all 9 streams, check if frequency is enough."""
+    ALL9 = [("ASXAUD","NYO"),("SP500","MOM"),("USDCAD","MOM"),("USDJPY","NYO"),
+            ("XAGUSD","ARB"),("DAX40","ARB"),("ESXEUR","NYO"),("UK100","ARB"),("USDJPY","ARB")]
+
+    print("\n" + "="*70)
+    print("  ALL-9 streams with ML filter (>35% confidence)")
+    print("="*70)
+
+    all_records = []
+    for sym, arch in ALL9:
+        m15, mtf = load_m15_mtf(sym)
+        fn = {"ARB":extract_arb,"NYO":extract_nyo,"MOM":extract_mom}[arch]
+        trades = fn(m15, mtf)
+        recs = extract_features(m15, mtf, trades, sym, arch)
+        all_records.extend(recs)
+
+    df = pd.DataFrame(all_records).sort_values("entry_t").reset_index(drop=True)
+    df["date"] = pd.to_datetime(df["date"])
+    df["rolling_wr"] = df["label"].shift(1).rolling(10,min_periods=3).mean().fillna(0.5)
+    FEAT_COLS_EXT = FEAT_COLS + ["rolling_wr"]
+
+    dates = sorted(df["date"].unique())
+    cut   = dates[int(len(dates)*0.70)]
+    IS    = df[df["date"] <  cut]
+    OOS   = df[df["date"] >= cut].copy()
+
+    from xgboost import XGBClassifier
+    from sklearn.calibration import CalibratedClassifierCV
+    X_is = IS[FEAT_COLS_EXT].fillna(0).values; y_is = IS["label"].values
+    scale_pos = (y_is==0).sum()/(y_is==1).sum()
+    xgb = XGBClassifier(n_estimators=400,max_depth=4,learning_rate=0.04,
+                        subsample=0.8,colsample_bytree=0.7,
+                        scale_pos_weight=scale_pos,eval_metric="logloss",
+                        random_state=42,verbosity=0)
+    model = CalibratedClassifierCV(xgb,cv=5,method="isotonic")
+    print("Retraining on all-9 IS …")
+    model.fit(X_is, y_is)
+    OOS["prob"] = model.predict_proba(OOS[FEAT_COLS_EXT].fillna(0).values)[:,1]
+
+    for thresh in [0.33, 0.35, 0.38, 0.40]:
+        filt = OOS[OOS["prob"] >= thresh]
+        if len(filt) < 5: print(f"  >{thresh:.0%}: too few ({len(filt)})"); continue
+        trades_f = filt.to_dict("records")
+        Rs = np.array([t["R"] for t in trades_f])
+        wr = (Rs>0).mean()*100; expR = Rs.mean()
+        d0 = filt["date"].min(); d1 = filt["date"].max()
+        tpm = len(filt)/max((d1-d0).days/30.44,0.1)
+        print(f"\n  >{thresh:.0%}: {len(filt)} trades  WR={wr:.0f}%  expR={expR:+.3f}  {tpm:.1f}t/mo")
+        print(f"  {'Risk%':>6}  {'Pass%':>7}  {'Bust%':>6}  {'Med.Mo':>7}")
+        for risk in [0.0050,0.0075,0.0100,0.0125,0.0150,0.0200]:
+            mc = monte_carlo(trades_f, risk)
+            flag = " ***" if mc["bust_pct"]<=5.0 and mc["med_mo"]<=3.5 else ""
+            print(f"  {risk*100:>5.2f}%  {mc['pass_pct']:>6.1f}%  {mc['bust_pct']:>5.1f}%  "
+                  f"{mc['med_mo']:>6.1f}{flag}")
+
+if __name__ == "__main__":
+    run_all9_filter()
