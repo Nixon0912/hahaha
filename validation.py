@@ -43,11 +43,11 @@ def train_score(IS_df, OOS_df):
     if len(np.unique(y_is)) < 2 or len(y_is) < 30:
         return None
     scale_pos = max((y_is==0).sum()/(y_is==1).sum(), 0.1)
-    xgb = XGBClassifier(n_estimators=300, max_depth=4, learning_rate=0.05,
+    xgb = XGBClassifier(n_estimators=400, max_depth=4, learning_rate=0.04,
                         subsample=0.8, colsample_bytree=0.7,
                         scale_pos_weight=scale_pos, eval_metric="logloss",
                         random_state=42, verbosity=0)
-    model = CalibratedClassifierCV(xgb, cv=3, method="isotonic")
+    model = CalibratedClassifierCV(xgb, cv=5, method="isotonic")
     model.fit(X_is, y_is)
     OOS_out = OOS_df.copy()
     OOS_out["prob"] = model.predict_proba(
