@@ -4,3 +4,4 @@ __pycache__/
 .DS_Store
 ea/model.joblib
 ea/replay_trades.csv
+ea/ea.log
