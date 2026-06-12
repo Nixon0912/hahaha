@@ -7,9 +7,14 @@ from pathlib import Path
 # ── Paths ──────────────────────────────────────────────────────────────────
 EA_DIR       = Path(__file__).parent
 MODEL_PATH   = EA_DIR / "model.joblib"
-SIGNAL_FILE  = EA_DIR / "signals.json"   # Python writes, MQL5 reads
 LOG_FILE     = EA_DIR / "ea.log"
 STATE_FILE   = EA_DIR / "state.json"     # persists daily PnL, trade history
+
+# MT5 on Mac writes/reads files from its sandbox (FILE_COMMON flag in MQL5).
+# Python must write signals.json to this exact path so the EA can find it.
+# Adjust the profile folder name if yours differs (check ~/Library/Application Support/).
+MT5_FILES_DIR = Path.home() / "Library/Application Support/MetaTrader 5/MQL5/Files"
+SIGNAL_FILE   = MT5_FILES_DIR / "apex9_signals.json"
 
 # ── Locked strategy parameters (audit-frozen) ─────────────────────────────
 ML_THRESHOLD  = 0.35     # P(win) cutoff — DO NOT TUNE

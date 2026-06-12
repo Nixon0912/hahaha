@@ -18,10 +18,13 @@
 #include <JAson.mqh>   // Download from MQL5 community if not present
 
 //--- inputs
-input string SIGNAL_FILE  = "C:\\apex9\\ea\\signals.json"; // Path to signals.json
-input int    MAGIC_NUMBER  = 20260101;
-input int    DEVIATION_PTS = 20;
-input bool   VERBOSE       = true;
+// On Mac, MT5 reads/writes files in:
+//   ~/Library/Application Support/MetaTrader 5/MQL5/Files/
+// FILE_COMMON flag maps to that directory — just use the filename, no path needed.
+input string SIGNAL_FILENAME = "apex9_signals.json"; // filename only, no path
+input int    MAGIC_NUMBER    = 20260101;
+input int    DEVIATION_PTS   = 20;
+input bool   VERBOSE         = true;
 
 CTrade trade;
 datetime lastFileTime = 0;
@@ -50,10 +53,10 @@ void OnTick() { } // not used
 //+------------------------------------------------------------------+
 void ProcessSignalFile()
 {
-    if(!FileIsExist(SIGNAL_FILE)) return;
+    // FILE_COMMON maps to ~/Library/Application Support/MetaTrader 5/MQL5/Files/ on Mac
+    if(!FileIsExist(SIGNAL_FILENAME, FILE_COMMON)) return;
 
-    // Read file
-    int fh = FileOpen(SIGNAL_FILE, FILE_READ | FILE_TXT | FILE_ANSI);
+    int fh = FileOpen(SIGNAL_FILENAME, FILE_READ | FILE_TXT | FILE_ANSI | FILE_COMMON);
     if(fh == INVALID_HANDLE) return;
 
     string content = "";
@@ -102,8 +105,8 @@ void ProcessSignalFile()
 
     if(anyPending)
     {
-        // Write back updated statuses
-        int fw = FileOpen(SIGNAL_FILE, FILE_WRITE | FILE_TXT | FILE_ANSI);
+        // Write back updated statuses (FILE_COMMON keeps it in the same sandbox dir)
+        int fw = FileOpen(SIGNAL_FILENAME, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
         if(fw != INVALID_HANDLE)
         {
             FileWriteString(fw, updated.Serialize());

@@ -1,11 +1,12 @@
 """
-MT5 order execution bridge.
-Connects to MetaTrader5, places/manages orders, handles force-close.
+MT5 execution bridge — Mac signal-file mode.
 
-Requires: pip install MetaTrader5  (Windows only)
-The MetaTrader5 Python package is a Windows-only library.
-On Mac/Linux, this module generates a signals.json file instead,
-which the companion MQL5 EA reads and executes.
+On Mac, the MetaTrader5 Python package is not available.
+Python writes orders to apex9_signals.json in the MT5 common files directory:
+  ~/Library/Application Support/MetaTrader 5/MQL5/Files/apex9_signals.json
+
+The MQL5 EA (APEX9_EA.mq5) polls this file every 10 seconds and executes orders.
+Python reads back the updated file to confirm execution status.
 """
 import json
 import logging

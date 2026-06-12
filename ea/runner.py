@@ -268,7 +268,12 @@ def run(signal_file_mode: bool = False):
 
     load_model()
 
-    if not signal_file_mode:
+    # On Mac the MetaTrader5 Python package is unavailable — always signal-file mode
+    import platform
+    if platform.system() == "Darwin":
+        signal_file_mode = True
+        log.info("Mac detected — using signal-file mode (apex9_signals.json)")
+    elif not signal_file_mode:
         if not connect_mt5():
             log.warning("MT5 not available — switching to signal-file mode")
             signal_file_mode = True
