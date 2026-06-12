@@ -46,6 +46,8 @@ from ea.executor import (
     connect_mt5, get_account_info, get_server_time, get_symbol_info,
     get_open_positions, place_order, force_close_all, write_close_signal
 )
+from ea.regime import classify_regime, stream_allowed
+from ea.config import REGIME_SYMS
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -65,6 +67,8 @@ _model_feats  = None
 _traded_today = set()  # (symbol, arch) pairs already traded today
 _mom_state    = {}     # (symbol, arch) → prev_above_ema
 _last_bar_dt  = {}     # symbol → last processed M15 bar timestamp
+_regime       = {"rv": None, "tr": None, "chop": False, "n_syms": 0}
+_regime_date  = None   # date the regime was last computed for
 
 
 def load_model():
@@ -119,6 +123,24 @@ def compute_rolling_wr(state: dict) -> float:
     return float(np.mean([r > 0 for r in last10]))
 
 
+def update_regime(server_time: datetime):
+    """Compute the regime once per server day (lagged data, no lookahead)."""
+    global _regime, _regime_date
+    today = server_time.date()
+    if _regime_date == today:
+        return
+    m15_by_sym = {}
+    for sym in REGIME_SYMS:
+        m15 = get_m15_data(sym, n_bars=8000)  # ~80 trading days of M15
+        if m15 is not None:
+            m15_by_sym[sym] = m15
+    _regime = classify_regime(m15_by_sym, pd.Timestamp(today))
+    _regime_date = today
+    tag = "CHOP — MOM streams benched" if _regime["chop"] else "TREND — all streams active"
+    log.info(f"Regime [{today}]: vol={_regime['rv']:.1f}%  trendiness={_regime['tr']:.2f}  "
+             f"({_regime['n_syms']} syms) → {tag}")
+
+
 def reset_daily_traded(server_time: datetime):
     """Reset per-stream trading flag at start of server day."""
     global _traded_today
@@ -167,6 +189,10 @@ def process_stream(sym: str, arch: str,
     key = (sym, arch)
     if key in _traded_today:
         return
+
+    # ── Regime gate ────────────────────────────────────────────────────────
+    if not stream_allowed(arch, _regime):
+        return  # archetype benched in current regime (logged once at daily reset)
 
     entry_t = m15.index[-1]
     h = entry_t.hour
@@ -299,6 +325,7 @@ def run(signal_file_mode: bool = False):
             # ── Daily reset ──────────────────────────────────────────────
             reset_daily_traded(server_time)
             reset_daily(state, account["balance"])
+            update_regime(server_time)
 
             # ── Force-close windows ──────────────────────────────────────
             handle_force_close(server_time, state)

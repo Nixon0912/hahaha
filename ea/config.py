@@ -58,6 +58,15 @@ CB_T3_TRADES       = 10      # last N trades
 CB_T3_MIN_EXPR     = 0.0     # expR threshold
 CB_T3_MIN_DAYS     = 10      # minimum calendar days elapsed
 
+# ── Regime gate (validated OOS 2025-01 → 2026-06) ─────────────────────────
+# CHOP = cross-asset 60d vol > 18% ann. AND trendiness < 0.30 (lagged 1 day).
+# In CHOP, MOM streams are benched: OOS chop expR ARB +2.08, NYO +0.47, MOM -0.74.
+REGIME_SYMS         = ["SP500", "DAX40", "USDJPY", "XAGUSD", "USDCAD", "ESXEUR"]
+REGIME_LOOKBACK_D   = 60
+REGIME_VOL_THRESH   = 18.0    # annualized %, cross-asset mean
+REGIME_TREND_THRESH = 0.30    # |60d ret| / 60d vol, cross-asset mean
+REGIME_BENCH_ARCHS  = {"MOM"}  # archetypes disabled in CHOP
+
 # ── Inactivity alerts (days since last closed trade) ──────────────────────
 INACTIVITY_ALERT_DAYS = [14, 21, 25, 28]
 
