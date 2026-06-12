@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+ea/model.joblib
+ea/replay_trades.csv
