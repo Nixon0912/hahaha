@@ -2,8 +2,11 @@
 Signal detection — ARB, NYO, MOM archetypes.
 Mirrors backtest entry logic exactly.
 """
+import sys
 import numpy as np
 import pandas as pd
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from multi_asset_scan import ranges as build_ranges, build_mtf
 from ea.config import SL_MULT, SL_LO, SL_HI, ARB_RANGE_H, NYO_RANGE_H
 

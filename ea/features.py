@@ -2,8 +2,11 @@
 Feature computation for live signals.
 Mirrors the backtest feature pipeline exactly — same code, same lag logic.
 """
+import sys
 import numpy as np
 import pandas as pd
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from ml_filter import FEAT_COLS
 from multi_asset_scan import build_mtf, ranges as build_ranges
 

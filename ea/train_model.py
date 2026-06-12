@@ -6,6 +6,7 @@ Usage:
     cd /path/to/hahaha
     python ea/train_model.py
 """
+import sys
 import numpy as np
 import pandas as pd
 import joblib
@@ -13,6 +14,7 @@ import glob
 import warnings
 warnings.filterwarnings("ignore")
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from multi_asset_scan import load_raw, build_mtf, extract_arb, extract_nyo, extract_mom
 from ml_filter import load_m15_mtf, extract_features, FEAT_COLS
