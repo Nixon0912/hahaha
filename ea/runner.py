@@ -322,20 +322,25 @@ def run(signal_file_mode: bool = False):
                 log.critical("💀 ACCOUNT BUSTED — stopping EA")
                 break
 
-            # ── Daily reset ──────────────────────────────────────────────
+            # ── Daily reset (server date, not local) ─────────────────────
             reset_daily_traded(server_time)
-            reset_daily(state, account["balance"])
+            reset_daily(state, account["balance"],
+                        server_date=server_time.date())
             update_regime(server_time)
 
             # ── Force-close windows ──────────────────────────────────────
             handle_force_close(server_time, state)
 
-            # ── Circuit breaker evaluation ───────────────────────────────
+            # ── Circuit breaker evaluation (real equity for T2) ──────────
             if not state.get("circuit_breaker_active"):
-                evaluate_circuit_breaker(state, INIT_BALANCE)
+                evaluate_circuit_breaker(
+                    state, INIT_BALANCE,
+                    live_balance=account.get("balance"),
+                    live_equity=account.get("equity"),
+                )
 
-            # ── Inactivity alerts ────────────────────────────────────────
-            for alert in check_inactivity(state):
+            # ── Inactivity alerts + day-28 contingency ───────────────────
+            for alert in check_inactivity(state, server_date=server_time.date()):
                 log.warning(alert)
 
             # ── Evaluate each stream ─────────────────────────────────────

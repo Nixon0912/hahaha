@@ -63,6 +63,10 @@ def calculate_lots(symbol: str, sl_dist: float, balance: float,
     sl_ticks    = sl_dist / tick_size
     lots        = risk_amount / (sl_ticks * tick_value)
     Always round DOWN to volume_step.
+
+    CRITICAL: if raw_lots < volume_min, return 0.0 and skip the trade.
+    We never force-round up to volume_min — that would make actual risk
+    exceed the intended risk budget, violating the 1.25% cap.
     """
     if sl_dist <= 0 or tick_size <= 0 or tick_value <= 0:
         log.warning(f"{symbol}: invalid sizing inputs — skip")
@@ -72,12 +76,29 @@ def calculate_lots(symbol: str, sl_dist: float, balance: float,
     sl_ticks    = sl_dist / tick_size
     raw_lots    = risk_amount / (sl_ticks * tick_value)
 
-    # Round DOWN — never up (audit requirement)
+    # Round DOWN to volume_step — never up
     lots = math.floor(raw_lots / volume_step) * volume_step
-    lots = max(volume_min, min(volume_max, lots))
 
-    # Verify: actual cash risk if SL hit
+    # Skip if below broker minimum — do NOT force up to volume_min.
+    # Forcing up would make actual risk = volume_min * sl_ticks * tick_value,
+    # which can meaningfully exceed the 1.25% budget on small accounts or
+    # wide SLs.
+    if lots < volume_min:
+        actual_if_forced = volume_min * sl_ticks * tick_value
+        log.warning(f"{symbol}: sized lots={lots:.4f} < volume_min={volume_min} — "
+                    f"trade skipped (forcing min would risk "
+                    f"${actual_if_forced:.2f} = {actual_if_forced/balance*100:.2f}%)")
+        return 0.0
+
+    lots = min(lots, volume_max)
+
+    # Verify: actual cash risk must not exceed 1.5× intended (sanity check)
     actual_risk = lots * sl_ticks * tick_value
+    if actual_risk > risk_amount * 1.5:
+        log.warning(f"{symbol}: actual_risk=${actual_risk:.2f} > 1.5× intended "
+                    f"${risk_amount:.2f} — trade skipped")
+        return 0.0
+
     log.info(f"{symbol}: risk=${risk_amount:.2f}  SL={sl_dist:.5f}  "
              f"lots={lots:.2f}  actual_risk=${actual_risk:.2f}  "
              f"({actual_risk/balance*100:.2f}%)")
@@ -110,9 +131,21 @@ def check_circuit_breaker(state: dict) -> tuple[bool, str]:
         return False, f"Circuit breaker active: {reason}"
     return True, ""
 
-def evaluate_circuit_breaker(state: dict, starting_balance: float) -> bool:
+def evaluate_circuit_breaker(state: dict, starting_balance: float,
+                             live_balance: float | None = None,
+                             live_equity: float | None = None) -> bool:
     """
     Evaluate three independent CB triggers. If any fires, activate and return True.
+
+    Args:
+        state:           persistent state dict
+        starting_balance: challenge-start balance (used as T2 reference)
+        live_balance:    actual MT5 account balance (preferred for T2)
+        live_equity:     actual MT5 equity including open positions (preferred for T2)
+
+    T2 uses live account equity/balance when available (fixes auditor finding:
+    simulated reconstruction misses slippage, partial fills, real float P/L).
+    Falls back to trade-history simulation only if MT5 data unavailable.
     """
     history = state.get("trade_history", [])
     if not history:
@@ -128,15 +161,27 @@ def evaluate_circuit_breaker(state: dict, starting_balance: float) -> bool:
             _activate_cb(state, reason)
             return True
 
-    # T2: account drawdown ≥ -4% from starting balance
-    # (starting_balance is the balance at challenge start)
-    # Approximated from trade history if balance not directly available
-    simulated_bal = starting_balance
-    for t in history:
-        simulated_bal += simulated_bal * RISK_PCT * t["R"]
-    dd = (simulated_bal - starting_balance) / starting_balance
+    # T2: drawdown ≥ -4% from starting balance.
+    # Use real MT5 equity (includes open position float) when available.
+    # Fall back to simulated reconstruction only if MT5 data is absent.
+    if live_equity is not None:
+        ref = live_equity
+        source = "live_equity"
+    elif live_balance is not None:
+        ref = live_balance
+        source = "live_balance"
+    else:
+        # Fallback: simulate from trade history (less accurate — misses
+        # slippage, real lot sizes, partial fills, commission mismatch)
+        ref = starting_balance
+        for t in history:
+            ref += ref * RISK_PCT * t["R"]
+        source = "simulated"
+
+    dd = (ref - starting_balance) / starting_balance
     if dd <= CB_T2_DRAWDOWN:
-        reason = f"T2: simulated drawdown {dd*100:.2f}% ≤ {CB_T2_DRAWDOWN*100:.0f}%"
+        reason = (f"T2: drawdown {dd*100:.2f}% ≤ {CB_T2_DRAWDOWN*100:.0f}% "
+                  f"(source={source}  ref=${ref:.2f}  start=${starting_balance:.2f})")
         _activate_cb(state, reason)
         return True
 
@@ -165,17 +210,43 @@ def _activate_cb(state: dict, reason: str):
 
 # ── Inactivity monitor ────────────────────────────────────────────────────
 
-def check_inactivity(state: dict) -> list[str]:
-    """Return list of alert messages if inactivity thresholds are breached."""
+def check_inactivity(state: dict,
+                     server_date: date | None = None) -> list[str]:
+    """
+    Return alert messages and apply deterministic contingency actions.
+
+    At day 28 the contingency fires automatically: new trades are blocked
+    (by activating the circuit breaker) until manual review clears it.
+    This satisfies The5ers compliant-contingency requirement and is the
+    only inactivity action that does not require human presence to enforce.
+
+    Uses server_date when supplied (MT5 server time); falls back to local
+    date only if unavailable.
+    """
     last = state.get("last_trade_date")
     if last is None:
         return []
-    days = (date.today() - date.fromisoformat(last)).days
+    ref_date = server_date or date.today()
+    days = (ref_date - date.fromisoformat(last)).days
     alerts = []
     for threshold in INACTIVITY_ALERT_DAYS:
         if days >= threshold:
             alerts.append(f"INACTIVITY ALERT: {days} days since last trade "
                           f"(threshold: {threshold}d)")
+
+    # Day-28 contingency: block new trades until manual review.
+    # The compliant action at this point is to stop trading and contact
+    # The5ers to confirm the account is still in good standing, then
+    # manually reset this flag once confirmed.
+    if days >= 28 and not state.get("circuit_breaker_active"):
+        reason = (f"INACTIVITY CONTINGENCY: {days} days without a trade — "
+                  f"auto-blocking new orders. Manual reset required after review.")
+        state["circuit_breaker_active"] = True
+        state["circuit_breaker_reason"] = reason
+        state["circuit_breaker_since"]  = str(datetime.now())
+        log.critical(reason)
+        alerts.append(reason)
+
     return alerts
 
 
@@ -188,9 +259,19 @@ def record_trade(state: dict, sym: str, arch: str, R: float, trade_date: str):
     state["last_trade_date"] = trade_date
     log.info(f"Trade recorded: {sym}-{arch}  R={R:+.3f}  ({trade_date})")
 
-def reset_daily(state: dict, balance: float):
-    today = str(date.today())
-    if state.get("daily_start_date") != today:
-        state["daily_start_date"]    = today
+def reset_daily(state: dict, balance: float,
+                server_date: date | None = None):
+    """
+    Reset daily tracking baseline.
+    Uses MT5 server date when supplied — critical for prop challenges where
+    the server calendar (UTC+3) differs from local Mac/VPS date.
+    Falls back to local date only if server time is unavailable.
+    """
+    ref_date = server_date or date.today()
+    today_str = str(ref_date)
+    if state.get("daily_start_date") != today_str:
+        state["daily_start_date"]    = today_str
         state["daily_start_balance"] = balance
-        log.info(f"Daily reset: start_balance=${balance:.2f}")
+        source = "server" if server_date else "local"
+        log.info(f"Daily reset ({source} date {today_str}): "
+                 f"start_balance=${balance:.2f}")
