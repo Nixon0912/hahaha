@@ -1,0 +1,16 @@
+F13 Signal Reconciliation — live check_* vs backtest extract_*
+
+Stream          Backtest   Live  Match Status
+--------------------------------------------------
+ASXAUD-NYO             291    291    291 ✅ OK
+DAX40-ARB             308    308    308 ✅ OK
+ESXEUR-NYO             302    302    302 ✅ OK
+SP500-MOM             157    157    157 ✅ OK
+UK100-ARB             278    278    278 ✅ OK
+USDCAD-MOM             149    149    149 ✅ OK
+USDJPY-ARB             246    246    246 ✅ OK
+USDJPY-NYO             245    245    245 ✅ OK
+XAGUSD-ARB             193    193    193 ✅ OK
+--------------------------------------------------
+✅  PERFECT MATCH — live signal path == backtest signal path.
+    The EA will trade exactly the setups that were validated.
