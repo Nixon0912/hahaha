@@ -30,7 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from ea.config import (
-    MODEL_PATH, SIGNAL_FILE, LOG_FILE, STATE_FILE,
+    MODEL_PATH, SIGNAL_FILE, LOG_FILE, STATE_FILE, MT5_FILES_DIR,
     STREAMS, ML_THRESHOLD, RISK_PCT, FORCE_CLOSE_H,
     INIT_BALANCE, TARGET_BALANCE, BUST_FLOOR
 )
@@ -105,14 +105,43 @@ def get_m15_data(symbol: str, n_bars: int = 2000) -> pd.DataFrame | None:
         df = df[(df["high"] > df["low"]) & (df["close"] > 0)]
         return df
     except ImportError:
-        # Fallback: read from local CSV (for testing / signal-file mode)
+        # Signal-file mode (Mac/Wine): the EA exports live M15 bars to the
+        # Common folder. Read those. Fall back to the bundled CSV only for
+        # offline testing when no live export exists yet.
+        live = _read_exported_bars(symbol, n_bars)
+        if live is not None:
+            return live
         import glob
         from multi_asset_scan import load_raw
         files = sorted(glob.glob(str(Path(__file__).parent.parent / f"{symbol}_M15_*.csv")))
         if not files:
             return None
         fpath = max(files, key=lambda f: Path(f).stat().st_size)
+        log.warning(f"{symbol}: no live export found — using STALE bundled CSV "
+                    f"(testing only, will not trade live)")
         return load_raw(fpath)
+
+
+def _read_exported_bars(symbol: str, n_bars: int) -> pd.DataFrame | None:
+    """Read live M15 bars the EA exported to the MT5 Common folder.
+    Returns None if the file is missing or unreadable (caller falls back)."""
+    fp = MT5_FILES_DIR / f"apex9_bars_{symbol}.csv"
+    if not fp.exists():
+        return None
+    try:
+        df = pd.read_csv(fp)
+        df["datetime"] = pd.to_datetime(df["datetime"],
+                                        format="%Y.%m.%d %H:%M:%S", errors="coerce")
+        df = df.dropna(subset=["datetime"]).set_index("datetime")
+        df = df[["open", "high", "low", "close", "tick_vol", "spread"]]
+        df = df[(df["high"] > df["low"]) & (df["close"] > 0)].sort_index()
+        if df.empty:
+            return None
+        return df.tail(n_bars)
+    except Exception as e:
+        # Half-written file or transient read error — skip this cycle
+        log.debug(f"{symbol}: export read skipped ({e})")
+        return None
 
 
 def compute_rolling_wr(state: dict) -> float:

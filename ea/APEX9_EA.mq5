@@ -25,9 +25,16 @@ input string SIGNAL_FILENAME = "apex9_signals.json"; // filename only, no path
 input int    MAGIC_NUMBER    = 20260101;
 input int    DEVIATION_PTS   = 20;
 input bool   VERBOSE         = true;
+input int    EXPORT_BARS     = 8500;  // M15 history exported per symbol for Python
 
 CTrade trade;
 datetime lastFileTime = 0;
+
+// Symbols the Python engine needs live M15 data for (8 unique across 9 streams
+// + the regime gate). Must match the broker's symbol names exactly.
+string   ExportSymbols[] = {"ASXAUD","DAX40","ESXEUR","SP500",
+                            "UK100","USDCAD","USDJPY","XAGUSD"};
+datetime lastExportBar[];  // sized in OnInit — one slot per ExportSymbols entry
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -36,15 +43,61 @@ int OnInit()
     trade.SetDeviationInPoints(DEVIATION_PTS);
     trade.SetTypeFilling(ORDER_FILLING_IOC);
     EventSetTimer(10); // check every 10 seconds
-    Print("APEX9 EA initialized. Watching: ", SIGNAL_FILENAME);
+    ArrayResize(lastExportBar, ArraySize(ExportSymbols));
+    ArrayInitialize(lastExportBar, 0);
+    // Ensure all export symbols are in Market Watch so CopyRates works
+    for(int s = 0; s < ArraySize(ExportSymbols); s++)
+        SymbolSelect(ExportSymbols[s], true);
+    Print("APEX9 EA initialized. Watching: ", SIGNAL_FILENAME,
+          " | exporting ", ArraySize(ExportSymbols), " symbols");
     return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-    ProcessSignalFile();
+    ExportBars();        // push live M15 bars to Python
+    ProcessSignalFile(); // pull signals Python produced
     CheckForceClose();
+}
+
+//+------------------------------------------------------------------+
+// Export recent M15 OHLCV per symbol to the Common folder so the Python
+// ML engine has a live feed. Only rewrites a symbol's file when a new M15
+// bar has formed. Writes to a .tmp then renames so Python never reads a
+// half-written file.
+void ExportBars()
+{
+    for(int s = 0; s < ArraySize(ExportSymbols); s++)
+    {
+        string sym = ExportSymbols[s];
+        datetime t0 = (datetime)SeriesInfoInteger(sym, PERIOD_M15, SERIES_LASTBAR_DATE);
+        if(t0 == 0 || t0 == lastExportBar[s]) continue;  // no new bar yet
+
+        MqlRates rates[];
+        ArraySetAsSeries(rates, false);
+        int copied = CopyRates(sym, PERIOD_M15, 0, EXPORT_BARS, rates);
+        if(copied <= 0) continue;
+
+        string fn  = "apex9_bars_" + sym + ".csv";
+        string tmp = "apex9_bars_" + sym + ".tmp";
+        int fh = FileOpen(tmp, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+        if(fh == INVALID_HANDLE) continue;
+
+        FileWriteString(fh, "datetime,open,high,low,close,tick_vol,spread\n");
+        for(int i = 0; i < copied; i++)
+            FileWriteString(fh, StringFormat("%s,%.5f,%.5f,%.5f,%.5f,%d,%d\n",
+                TimeToString(rates[i].time, TIME_DATE | TIME_MINUTES | TIME_SECONDS),
+                rates[i].open, rates[i].high, rates[i].low, rates[i].close,
+                (int)rates[i].tick_volume, (int)rates[i].spread));
+        FileClose(fh);
+
+        FileDelete(fn, FILE_COMMON);
+        if(FileMove(tmp, FILE_COMMON, fn, FILE_COMMON))
+            lastExportBar[s] = t0;
+        if(VERBOSE)
+            Print("Exported ", copied, " M15 bars for ", sym);
+    }
 }
 
 //+------------------------------------------------------------------+
