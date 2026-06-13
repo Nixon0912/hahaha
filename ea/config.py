@@ -25,6 +25,17 @@ SL_LO         = 0.0008   # min SL as fraction of price
 SL_HI         = 0.006    # max SL as fraction of price
 FORCE_CLOSE_H = 21       # server hour — all positions closed before this
 
+# Range-size acceptance bands (fraction of mid price).
+# MUST match the extractor defaults in multi_asset_scan.py exactly:
+#   extract_arb: rng_lo=0.0003, rng_hi=0.015
+#   extract_nyo: rng_lo=0.0002, rng_hi=0.012
+# These are the validated backtest values — the source of truth. ea/signals.py
+# imports them so the live path can never drift from the backtest (audit F13).
+ARB_RNG_LO    = 0.0003
+ARB_RNG_HI    = 0.015
+NYO_RNG_LO    = 0.0002
+NYO_RNG_HI    = 0.012
+
 # ── Streams ────────────────────────────────────────────────────────────────
 STREAMS = [
     # (MT5 symbol,  archetype,  entry_start_h, entry_end_h)

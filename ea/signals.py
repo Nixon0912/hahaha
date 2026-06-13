@@ -8,7 +8,8 @@ import pandas as pd
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from multi_asset_scan import ranges as build_ranges, build_mtf
-from ea.config import SL_MULT, SL_LO, SL_HI, ARB_RANGE_H, NYO_RANGE_H
+from ea.config import (SL_MULT, SL_LO, SL_HI, ARB_RANGE_H, NYO_RANGE_H,
+                       ARB_RNG_LO, ARB_RNG_HI, NYO_RNG_LO, NYO_RNG_HI)
 
 
 def _sl_dist(m15: pd.DataFrame, mtf: pd.DataFrame,
@@ -45,7 +46,7 @@ def check_arb(m15: pd.DataFrame, entry_t: pd.Timestamp) -> dict | None:
     r = rng_table.loc[dts]
     mid = (r["hi"] + r["lo"]) / 2
     rng_pct = r["rng"] / mid if mid > 0 else 0
-    if not (0.0002 <= rng_pct <= 0.015):
+    if not (ARB_RNG_LO <= rng_pct <= ARB_RNG_HI):
         return None
 
     price = float(m15.loc[entry_t, "close"])
@@ -92,7 +93,7 @@ def check_nyo(m15: pd.DataFrame, entry_t: pd.Timestamp) -> dict | None:
     r = rng_table.loc[dts]
     mid = (r["hi"] + r["lo"]) / 2
     rng_pct = r["rng"] / mid if mid > 0 else 0
-    if not (0.0002 <= rng_pct <= 0.015):
+    if not (NYO_RNG_LO <= rng_pct <= NYO_RNG_HI):
         return None
 
     price = float(m15.loc[entry_t, "close"])
