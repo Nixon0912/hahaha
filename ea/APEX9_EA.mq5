@@ -57,8 +57,63 @@ int OnInit()
 void OnTimer()
 {
     ExportBars();        // push live M15 bars to Python
+    ExportState();       // push account balance/equity, symbol specs, server time
     ProcessSignalFile(); // pull signals Python produced
     CheckForceClose();
+}
+
+//+------------------------------------------------------------------+
+// Export live account state, per-symbol specs, and broker server time so the
+// Python risk guards and lot sizing use REAL values (not $10k / guessed specs).
+// Writes via .tmp + rename so Python never reads a half-written file.
+void ExportState()
+{
+    // ── Account + server time → apex9_account.json ──
+    string acc = StringFormat(
+        "{\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,"
+        "\"free_margin\":%.2f,\"server_time\":\"%s\"}",
+        AccountInfoDouble(ACCOUNT_BALANCE),
+        AccountInfoDouble(ACCOUNT_EQUITY),
+        AccountInfoDouble(ACCOUNT_MARGIN),
+        AccountInfoDouble(ACCOUNT_MARGIN_FREE),
+        TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES | TIME_SECONDS));
+    WriteAtomic("apex9_account.json", acc);
+
+    // ── Per-symbol specs → apex9_symbols.json ──
+    string sj = "{";
+    for(int s = 0; s < ArraySize(ExportSymbols); s++)
+    {
+        string sym = ExportSymbols[s];
+        if(s > 0) sj += ",";
+        sj += StringFormat(
+            "\"%s\":{\"tick_size\":%.10f,\"tick_value\":%.10f,"
+            "\"volume_min\":%.4f,\"volume_max\":%.4f,\"volume_step\":%.4f,"
+            "\"spread\":%d,\"digits\":%d,\"point\":%.10f}",
+            sym,
+            SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_SIZE),
+            SymbolInfoDouble(sym, SYMBOL_TRADE_TICK_VALUE),
+            SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN),
+            SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX),
+            SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP),
+            (int)SymbolInfoInteger(sym, SYMBOL_SPREAD),
+            (int)SymbolInfoInteger(sym, SYMBOL_DIGITS),
+            SymbolInfoDouble(sym, SYMBOL_POINT));
+    }
+    sj += "}";
+    WriteAtomic("apex9_symbols.json", sj);
+}
+
+//+------------------------------------------------------------------+
+// Write text to a Common-folder file atomically (.tmp then rename).
+void WriteAtomic(string fname, string content)
+{
+    string tmp = fname + ".tmp";
+    int fh = FileOpen(tmp, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
+    if(fh == INVALID_HANDLE) return;
+    FileWriteString(fh, content);
+    FileClose(fh);
+    FileDelete(fname, FILE_COMMON);
+    FileMove(tmp, FILE_COMMON, fname, FILE_COMMON);
 }
 
 //+------------------------------------------------------------------+

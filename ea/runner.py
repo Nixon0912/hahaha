@@ -283,12 +283,14 @@ def process_stream(sym: str, arch: str,
     if not ok: log.warning(f"  → BLOCKED: {msg}"); return
 
     sym_info = get_symbol_info(sym)
-    if sym_info:
-        ok, msg = check_spread(sym, sym_info["spread"])
-        if not ok: log.warning(f"  → BLOCKED: {msg}"); return
-    else:
-        sym_info = {"tick_size": 1e-5, "tick_value": 1.0,
-                    "volume_min": 0.01, "volume_max": 100.0, "volume_step": 0.01}
+    if not sym_info:
+        # No real specs (EA export missing/stale). Sizing on guessed specs would
+        # break the 1.25% risk model — refuse the trade instead.
+        log.warning(f"  → BLOCKED: no symbol specs for {sym} (EA export missing) "
+                    f"— refusing to size on guessed values")
+        return
+    ok, msg = check_spread(sym, sym_info["spread"])
+    if not ok: log.warning(f"  → BLOCKED: {msg}"); return
 
     # ── Lot sizing ─────────────────────────────────────────────────────────
     lots = calculate_lots(

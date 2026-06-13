@@ -14,9 +14,25 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from ea.config import FORCE_CLOSE_H, SIGNAL_FILE, LOG_FILE
+from ea.config import FORCE_CLOSE_H, SIGNAL_FILE, LOG_FILE, MT5_FILES_DIR
 
 log = logging.getLogger("apex9.executor")
+
+# Files the EA exports so Python has live account/symbol/time state on Mac
+# (signal-file mode). Mirrors the bar export — same Common folder.
+_ACCOUNT_FILE = MT5_FILES_DIR / "apex9_account.json"
+_SYMBOLS_FILE = MT5_FILES_DIR / "apex9_symbols.json"
+
+
+def _read_json(path: Path):
+    """Read an EA-exported JSON file; return None on any error (caller falls back)."""
+    try:
+        if not path.exists():
+            return None
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None  # half-written file — retry next cycle
 
 # ── MT5 connection ─────────────────────────────────────────────────────────
 
@@ -43,7 +59,13 @@ def get_account_info() -> dict | None:
         return {"balance": info.balance, "equity": info.equity,
                 "margin": info.margin, "free_margin": info.margin_free}
     except ImportError:
-        return None
+        # Mac signal-file mode: read the account state the EA exported.
+        data = _read_json(_ACCOUNT_FILE)
+        if data is None:
+            return None
+        return {"balance": data.get("balance"), "equity": data.get("equity"),
+                "margin": data.get("margin", 0.0),
+                "free_margin": data.get("free_margin", 0.0)}
 
 def get_server_time() -> datetime | None:
     try:
@@ -53,6 +75,14 @@ def get_server_time() -> datetime | None:
             return datetime.fromtimestamp(tick.time)
         return None
     except ImportError:
+        # Use the broker server time the EA exported, NOT Mac UTC — the whole
+        # strategy is time-of-day gated, so this must be broker time.
+        data = _read_json(_ACCOUNT_FILE)
+        if data and data.get("server_time"):
+            try:
+                return datetime.strptime(data["server_time"], "%Y.%m.%d %H:%M:%S")
+            except Exception:
+                pass
         return datetime.utcnow()
 
 def get_symbol_info(symbol: str) -> dict | None:
@@ -72,7 +102,13 @@ def get_symbol_info(symbol: str) -> dict | None:
             "point":       info.point,
         }
     except ImportError:
-        return None
+        # Mac signal-file mode: read the per-symbol specs the EA exported.
+        # Returning None here forces a generic fallback that mis-sizes lots,
+        # so a missing entry must surface — caller logs and skips.
+        data = _read_json(_SYMBOLS_FILE)
+        if data is None:
+            return None
+        return data.get(symbol)
 
 def get_open_positions(symbol: str = None) -> list:
     try:
