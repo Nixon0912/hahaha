@@ -10,10 +10,38 @@ MODEL_PATH   = EA_DIR / "model.joblib"
 LOG_FILE     = EA_DIR / "ea.log"
 STATE_FILE   = EA_DIR / "state.json"     # persists daily PnL, trade history
 
-# MT5 on Mac writes/reads files from its sandbox (FILE_COMMON flag in MQL5).
-# Python must write signals.json to this exact path so the EA can find it.
-# Adjust the profile folder name if yours differs (check ~/Library/Application Support/).
-MT5_FILES_DIR = Path.home() / "Library/Application Support/MetaTrader 5/MQL5/Files"
+# MT5 reads/writes the signal file with the FILE_COMMON flag, which maps to the
+# terminal's *Common* data folder. Python must write signals.json there.
+#
+# This auto-detects the folder for both install types:
+#   • Wine wrapper (MetaQuotes Wine / CrossOver) — drive_c inside the app bundle
+#   • Native MetaTrader 5.app
+# Override with env var APEX9_COMMON_DIR if your layout differs.
+import os as _os
+from glob import glob as _glob
+
+def _detect_common_files_dir() -> Path:
+    env = _os.environ.get("APEX9_COMMON_DIR")
+    if env:
+        return Path(env)
+    home = Path.home()
+    candidates = []
+    # Wine wrapper: .../drive_c/users/<winuser>/AppData/Roaming/MetaQuotes/Terminal/Common/Files
+    candidates += _glob(str(home / "Library/Application Support" /
+                            "net.metaquotes.wine.metatrader5/drive_c/users/*/AppData/"
+                            "Roaming/MetaQuotes/Terminal/Common/Files"))
+    # CrossOver bottles
+    candidates += _glob(str(home / "Library/Application Support/CrossOver/Bottles/*/"
+                            "drive_c/users/*/AppData/Roaming/MetaQuotes/Terminal/"
+                            "Common/Files"))
+    for c in candidates:
+        if Path(c).is_dir():
+            return Path(c)
+    if candidates:
+        return Path(candidates[0])  # exists-but-empty case; will be created
+    return home / "Library/Application Support/MetaTrader 5/MQL5/Files"
+
+MT5_FILES_DIR = _detect_common_files_dir()
 SIGNAL_FILE   = MT5_FILES_DIR / "apex9_signals.json"
 
 # ── Locked strategy parameters (audit-frozen) ─────────────────────────────
