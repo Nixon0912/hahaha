@@ -7,4 +7,9 @@ scikit-learn>=1.3
 xgboost>=2.0
 joblib>=1.3
 statsmodels>=0.14
-MetaTrader5>=5.0.45
+
+# MetaTrader5 is WINDOWS-ONLY and will NOT install on macOS.
+# It is imported lazily (try/except) — the Mac runs in signal-file mode,
+# where Python writes apex9_signals.json and the MQL5 EA executes trades.
+# Only uncomment if you run the Python engine on Windows:
+# MetaTrader5>=5.0.45
