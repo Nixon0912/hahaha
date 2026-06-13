@@ -36,7 +36,7 @@ int OnInit()
     trade.SetDeviationInPoints(DEVIATION_PTS);
     trade.SetTypeFilling(ORDER_FILLING_IOC);
     EventSetTimer(10); // check every 10 seconds
-    Print("APEX9 EA initialized. Watching: ", SIGNAL_FILE);
+    Print("APEX9 EA initialized. Watching: ", SIGNAL_FILENAME);
     return INIT_SUCCEEDED;
 }
 
@@ -71,36 +71,31 @@ void ProcessSignalFile()
     if(!json.Deserialize(content)) { Print("JSON parse error"); return; }
 
     bool anyPending = false;
-    CJAVal updated;
-    updated.IsArray(true);
 
     for(int i = 0; i < json.Size(); i++)
     {
-        CJAVal sig = json[i];
-        string status = sig["status"].ToStr();
+        string status = json[i]["status"].ToStr();
 
         if(status == "pending")
         {
             anyPending = true;
-            string  sym  = sig["symbol"].ToStr();
-            int     dir  = (int)sig["direction"].ToInt();  // 1=buy, -1=sell
-            double  lots = sig["lots"].ToDbl();
-            double  sl   = sig["sl"].ToDbl();
-            double  tp   = sig["tp"].ToDbl();
-            string  cmt  = sig["comment"].ToStr();
+            string  sym  = json[i]["symbol"].ToStr();
+            int     dir  = (int)json[i]["direction"].ToInt();  // 1=buy, -1=sell
+            double  lots = json[i]["lots"].ToDbl();
+            double  sl   = json[i]["sl"].ToDbl();
+            double  tp   = json[i]["tp"].ToDbl();
+            string  cmt  = json[i]["comment"].ToStr();
 
             bool ok = ExecuteOrder(sym, dir, lots, sl, tp, cmt);
-            sig["status"] = ok ? "executed" : "failed";
-            sig["executed_at"] = TimeToString(TimeCurrent());
+            json[i]["status"].Set(ok ? "executed" : "failed");
+            json[i]["executed_at"].Set(TimeToString(TimeCurrent()));
         }
         else if(status == "close_all")
         {
-            string sym = sig["symbol"].ToStr();
+            string sym = json[i]["symbol"].ToStr();
             CloseAllForSymbol(sym);
-            sig["status"] = "closed";
+            json[i]["status"].Set("closed");
         }
-
-        updated.Add(sig);
     }
 
     if(anyPending)
@@ -109,7 +104,7 @@ void ProcessSignalFile()
         int fw = FileOpen(SIGNAL_FILENAME, FILE_WRITE | FILE_TXT | FILE_ANSI | FILE_COMMON);
         if(fw != INVALID_HANDLE)
         {
-            FileWriteString(fw, updated.Serialize());
+            FileWriteString(fw, json.Serialize());
             FileClose(fw);
         }
     }
