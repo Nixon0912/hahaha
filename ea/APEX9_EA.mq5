@@ -87,14 +87,14 @@ void ProcessSignalFile()
             string  cmt  = json[i]["comment"].ToStr();
 
             bool ok = ExecuteOrder(sym, dir, lots, sl, tp, cmt);
-            json[i]["status"].Set(ok ? "executed" : "failed");
-            json[i]["executed_at"].Set(TimeToString(TimeCurrent()));
+            json[i]["status"] = ok ? "executed" : "failed";
+            json[i]["executed_at"] = TimeToString(TimeCurrent());
         }
         else if(status == "close_all")
         {
             string sym = json[i]["symbol"].ToStr();
             CloseAllForSymbol(sym);
-            json[i]["status"].Set("closed");
+            json[i]["status"] = "closed";
         }
     }
 
