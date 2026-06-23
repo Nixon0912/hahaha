@@ -147,7 +147,7 @@ def basket_port(basket):
 print("\n"+"="*78)
 print("  VARIETY vs 5ers PASS RATE  (no time limit, daily-safe sizing)")
 print("="*78)
-print(f"  {'N':>3}{'basket':<46}{'mean|corr|':>10}{'Sh':>6}{'pass%':>7}{'bust%':>7}")
+print(f"  {'N':>3}{'basket':<46}{'mean|corr|':>10}{'Sh':>6}{'pass%':>7}{'bust%':>7}{'med_days':>10}")
 rows=[]
 for N in [3,4,5,7,10,len(selected)]:
     if N>len(selected): continue
@@ -159,7 +159,7 @@ for N in [3,4,5,7,10,len(selected)]:
     mc=challenge(port)
     rows.append((N,mcorr,sh,mc))
     label=",".join(basket) if N<=7 else ",".join(basket[:6])+f",+{N-6}"
-    print(f"  {N:>3}{label:<46}{mcorr:>10.3f}{sh:>6.2f}{mc['passp']:>6.1f}%{mc['bustp']:>6.1f}%")
+    print(f"  {N:>3}{label:<46}{mcorr:>10.3f}{sh:>6.2f}{mc['passp']:>6.1f}%{mc['bustp']:>6.1f}%{mc['med']:>10.0f}")
 
 # Best basket = highest pass with bust<15
 best=max(rows,key=lambda r:r[3]["passp"]-2*r[3]["bustp"])
@@ -181,4 +181,22 @@ ax[1].plot(Ns,cc,"o-",color="navy")
 ax[1].set_xlabel("# instruments"); ax[1].set_ylabel("mean |corr|")
 ax[1].grid(alpha=0.3); ax[1].set_title("Diversification (lower=better)")
 plt.tight_layout(); plt.savefig("ensemble_expanded.png",dpi=130)
+print("\n" + "="*78)
+print("  SPEED vs SAFETY — risk sweep on best baskets (no time limit)")
+print("  How fast can we pass while keeping bust < 10%?")
+print("="*78)
+print(f"  {'N':>3}{'base':>6}{'max':>5}{'pass%':>7}{'bust%':>7}{'med_days':>10}  note")
+for N in [5, 7, 10, 15]:
+    if N > len(selected): continue
+    basket = selected[:N]
+    port, _ = basket_port(basket)
+    for base_risk, max_risk in [(2,6),(3,8),(4,10),(5,12),(6,15)]:
+        mc = challenge(port, base_risk=base_risk, max_risk=max_risk)
+        bust_ok = mc["bustp"] < 10
+        speed = "⚡ fastest safe" if bust_ok and mc["med"] <= 40 else ""
+        star  = " ⭐" if bust_ok and mc["passp"] >= 90 and mc["med"] <= 60 else ""
+        if mc["passp"] >= 80:
+            print(f"  {N:>3}{base_risk:>6}{max_risk:>5}{mc['passp']:>6.1f}%"
+                  f"{mc['bustp']:>6.1f}%{mc['med']:>10.0f}  {speed}{star}")
+
 print("\n  Saved → ensemble_expanded.png")
